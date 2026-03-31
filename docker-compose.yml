@@ -1,0 +1,34 @@
+services:
+  faux-seer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    ports:
+      - "9091:9091"
+    volumes:
+      - faux-seer-data:/app/data
+    depends_on:
+      pgvector:
+        condition: service_healthy
+
+  pgvector:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: faux_seer
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d faux_seer"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - pgvector-data:/var/lib/postgresql/data
+
+volumes:
+  faux-seer-data:
+  pgvector-data:
