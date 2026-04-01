@@ -3,7 +3,7 @@
 FROM golang:1.26.1-trixie AS builder
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential ca-certificates pkg-config \
+    && apt-get install -y --no-install-recommends build-essential ca-certificates pkg-config libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -18,7 +18,7 @@ RUN CGO_ENABLED=1 go build -o /out/faux-seer ./cmd/faux-seer
 FROM debian:trixie-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates tzdata \
+    && apt-get install -y --no-install-recommends ca-certificates tzdata libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
