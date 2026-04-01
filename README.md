@@ -97,7 +97,7 @@ See `docs/status.md` for the current implementation status, known gaps, and reco
 
 ## Configuration
 
-The repo targets Go `1.24.0`.
+The repo targets Go `1.26.x`.
 
 Core environment variables:
 

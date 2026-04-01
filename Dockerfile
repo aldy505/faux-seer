@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:1.24.0-trixie AS builder
+FROM golang:1.26.1-trixie AS builder
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential ca-certificates pkg-config \
@@ -27,4 +27,4 @@ COPY --from=builder /out/faux-seer /usr/local/bin/faux-seer
 
 EXPOSE 9091
 
-CMD ["faux-seer"]
+CMD ["/usr/local/bin/faux-seer"]
