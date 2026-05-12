@@ -1,6 +1,6 @@
 module github.com/aldy505/faux-seer
 
-go 1.24.0
+go 1.26.1
 
 require (
 	github.com/asg017/sqlite-vec-go-bindings v0.1.6

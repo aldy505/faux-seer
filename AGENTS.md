@@ -135,7 +135,7 @@ A full `docker build` could not be run in the current environment earlier becaus
 - Behavior is compatibility-focused and heuristic in several places.
 - Autofix does not reproduce Seer's full Python agent loop.
 - `pgvector` only covers vector-backed surfaces, not all persistence.
-- The local toolchain rewrote `go.mod` to `go 1.24.0`; that is currently the validated module state in this environment.
+- The local toolchain rewrote `go.mod` to `go 1.26.1`; that is currently the validated module state in this environment.
 
 ## Best next steps
 
