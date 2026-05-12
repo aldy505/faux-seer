@@ -15,6 +15,7 @@ import (
 	"github.com/aldy505/faux-seer/internal/config"
 	"github.com/aldy505/faux-seer/internal/db"
 	"github.com/aldy505/faux-seer/internal/embedding"
+	"github.com/aldy505/faux-seer/internal/explorer"
 	"github.com/aldy505/faux-seer/internal/handler"
 	issuesummary "github.com/aldy505/faux-seer/internal/issueSummary"
 	"github.com/aldy505/faux-seer/internal/llm"
@@ -71,10 +72,11 @@ func main() {
 	}
 
 	autofixService := autofix.New(store, llmClient)
+	explorerService := explorer.New(store, llmClient)
 	similarityService := similarity.New(cfg, embeddingClient, vectorStore)
 	severityService := severity.New(llmClient)
 	issueSummaryService := issuesummary.New(llmClient)
-	server := handler.New(cfg, logger, store, autofixService, similarityService, severityService, issueSummaryService)
+	server := handler.New(cfg, logger, store, autofixService, explorerService, similarityService, severityService, issueSummaryService)
 
 	httpServer := &http.Server{Addr: cfg.Addr, Handler: obs.WrapHTTP(server.Routes())}
 	go func() {

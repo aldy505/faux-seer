@@ -31,6 +31,31 @@ type AutofixRunRecord struct {
 	StateJSON []byte
 }
 
+// ExplorerRunRecord persists an explorer run state blob and list metadata.
+type ExplorerRunRecord struct {
+	ID              int64
+	OrganizationID  int64
+	UserID          *int64
+	Title           string
+	CategoryKey     *string
+	CategoryValue   *string
+	Provider        *string
+	PRID            *int64
+	StateJSON       []byte
+	CreatedAt       string
+	LastTriggeredAt string
+}
+
+// ExplorerRunFilter controls explorer run listing.
+type ExplorerRunFilter struct {
+	OrganizationID int64
+	UserID         *int64
+	CategoryKey    *string
+	CategoryValue  *string
+	Offset         int
+	Limit          int
+}
+
 // GroupingRecord stores an embedding for similarity lookup.
 type GroupingRecord struct {
 	ProjectID     int64
@@ -99,6 +124,25 @@ CREATE TABLE IF NOT EXISTS supergroups (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_supergroups_org_project ON supergroups(organization_id, project_id);
+
+CREATE TABLE IF NOT EXISTS explorer_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  organization_id INTEGER NOT NULL,
+  user_id INTEGER NULL,
+  title TEXT NOT NULL,
+  category_key TEXT NULL,
+  category_value TEXT NULL,
+  provider TEXT NULL,
+  pr_id INTEGER NULL,
+  state_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  last_triggered_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_explorer_runs_org ON explorer_runs(organization_id, last_triggered_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_explorer_runs_org_user ON explorer_runs(organization_id, user_id, last_triggered_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_explorer_runs_org_category ON explorer_runs(organization_id, category_key, category_value, last_triggered_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_explorer_runs_pr ON explorer_runs(organization_id, provider, pr_id);
 `
 	_, err := s.DB.ExecContext(ctx, schema)
 	if err != nil {
@@ -160,6 +204,188 @@ func (s *Store) GetAutofixRunByPR(ctx context.Context, provider string, prID int
 	}
 	rec.StateJSON = []byte(state)
 	return &rec, nil
+}
+
+// CreateExplorerRun inserts a new explorer run.
+func (s *Store) CreateExplorerRun(ctx context.Context, record ExplorerRunRecord) (int64, error) {
+	timestamp := nowString()
+	if record.CreatedAt == "" {
+		record.CreatedAt = timestamp
+	}
+	if record.LastTriggeredAt == "" {
+		record.LastTriggeredAt = record.CreatedAt
+	}
+	result, err := s.DB.ExecContext(
+		ctx,
+		`INSERT INTO explorer_runs (
+			organization_id, user_id, title, category_key, category_value, provider, pr_id, state_json, created_at, last_triggered_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		record.OrganizationID,
+		record.UserID,
+		record.Title,
+		record.CategoryKey,
+		record.CategoryValue,
+		record.Provider,
+		record.PRID,
+		string(record.StateJSON),
+		record.CreatedAt,
+		record.LastTriggeredAt,
+		timestamp,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("insert explorer run: %w", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("explorer run last insert id: %w", err)
+	}
+	return id, nil
+}
+
+// UpdateExplorerRun updates a persisted explorer run state.
+func (s *Store) UpdateExplorerRun(ctx context.Context, record ExplorerRunRecord) error {
+	_, err := s.DB.ExecContext(
+		ctx,
+		`UPDATE explorer_runs
+		SET title = ?, category_key = ?, category_value = ?, provider = ?, pr_id = ?, state_json = ?, last_triggered_at = ?, updated_at = ?
+		WHERE id = ?`,
+		record.Title,
+		record.CategoryKey,
+		record.CategoryValue,
+		record.Provider,
+		record.PRID,
+		string(record.StateJSON),
+		record.LastTriggeredAt,
+		nowString(),
+		record.ID,
+	)
+	if err != nil {
+		return fmt.Errorf("update explorer run: %w", err)
+	}
+	return nil
+}
+
+// GetExplorerRun fetches an explorer run by ID.
+func (s *Store) GetExplorerRun(ctx context.Context, runID int64) (*ExplorerRunRecord, error) {
+	row := s.DB.QueryRowContext(
+		ctx,
+		`SELECT
+			id, organization_id, user_id, title, category_key, category_value, provider, pr_id, state_json, created_at, last_triggered_at
+		FROM explorer_runs
+		WHERE id = ?`,
+		runID,
+	)
+	var rec ExplorerRunRecord
+	var state string
+	if err := row.Scan(
+		&rec.ID,
+		&rec.OrganizationID,
+		&rec.UserID,
+		&rec.Title,
+		&rec.CategoryKey,
+		&rec.CategoryValue,
+		&rec.Provider,
+		&rec.PRID,
+		&state,
+		&rec.CreatedAt,
+		&rec.LastTriggeredAt,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get explorer run: %w", err)
+	}
+	rec.StateJSON = []byte(state)
+	return &rec, nil
+}
+
+// GetExplorerRunByPR fetches an explorer run by provider/pr pair.
+func (s *Store) GetExplorerRunByPR(ctx context.Context, organizationID int64, provider string, prID int64) (*ExplorerRunRecord, error) {
+	row := s.DB.QueryRowContext(
+		ctx,
+		`SELECT
+			id, organization_id, user_id, title, category_key, category_value, provider, pr_id, state_json, created_at, last_triggered_at
+		FROM explorer_runs
+		WHERE organization_id = ? AND provider = ? AND pr_id = ?
+		ORDER BY id DESC
+		LIMIT 1`,
+		organizationID,
+		provider,
+		prID,
+	)
+	var rec ExplorerRunRecord
+	var state string
+	if err := row.Scan(
+		&rec.ID,
+		&rec.OrganizationID,
+		&rec.UserID,
+		&rec.Title,
+		&rec.CategoryKey,
+		&rec.CategoryValue,
+		&rec.Provider,
+		&rec.PRID,
+		&state,
+		&rec.CreatedAt,
+		&rec.LastTriggeredAt,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get explorer run by pr: %w", err)
+	}
+	rec.StateJSON = []byte(state)
+	return &rec, nil
+}
+
+// ListExplorerRuns returns explorer runs using compatibility-focused filters.
+func (s *Store) ListExplorerRuns(ctx context.Context, filter ExplorerRunFilter) ([]ExplorerRunRecord, error) {
+	query := `SELECT
+		id, organization_id, user_id, title, category_key, category_value, provider, pr_id, state_json, created_at, last_triggered_at
+	FROM explorer_runs
+	WHERE organization_id = ?`
+	args := []any{filter.OrganizationID}
+	if filter.UserID != nil {
+		query += ` AND user_id = ?`
+		args = append(args, *filter.UserID)
+	}
+	if filter.CategoryKey != nil {
+		query += ` AND category_key = ?`
+		args = append(args, *filter.CategoryKey)
+	}
+	if filter.CategoryValue != nil {
+		query += ` AND category_value = ?`
+		args = append(args, *filter.CategoryValue)
+	}
+	query += ` ORDER BY last_triggered_at DESC, id DESC LIMIT ? OFFSET ?`
+	args = append(args, filter.Limit, filter.Offset)
+	rows, err := s.DB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list explorer runs: %w", err)
+	}
+	defer rows.Close()
+	var out []ExplorerRunRecord
+	for rows.Next() {
+		var rec ExplorerRunRecord
+		var state string
+		if err := rows.Scan(
+			&rec.ID,
+			&rec.OrganizationID,
+			&rec.UserID,
+			&rec.Title,
+			&rec.CategoryKey,
+			&rec.CategoryValue,
+			&rec.Provider,
+			&rec.PRID,
+			&state,
+			&rec.CreatedAt,
+			&rec.LastTriggeredAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan explorer run: %w", err)
+		}
+		rec.StateJSON = []byte(state)
+		out = append(out, rec)
+	}
+	return out, rows.Err()
 }
 
 // PutProjectPreference stores a project preference blob.

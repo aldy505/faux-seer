@@ -88,6 +88,150 @@ curl -sS -H "Content-Type: application/json" -H "Authorization: $AUTH" -d "$BODY
   http://127.0.0.1:9091/v1/automation/codebase/repo/check-access
 ```
 
+## Explorer
+
+### `POST /v1/automation/explorer/chat`
+
+Request example:
+
+```json
+{
+  "organization_id": 1,
+  "query": "What are my slowest DB queries?",
+  "page_name": "/issues/:groupId/",
+  "on_page_context": "Trace ID: 467c1436d96a4aab9a4fa01905ab7ee9",
+  "user_org_context": {
+    "user_id": 1
+  }
+}
+```
+
+Response example:
+
+```json
+{
+  "run_id": 1,
+  "has_explorer_index": true,
+  "has_org_project_context": true
+}
+```
+
+### `POST /v1/automation/explorer/state`
+
+Request example:
+
+```json
+{
+  "organization_id": 1,
+  "run_id": 1
+}
+```
+
+Response example:
+
+```json
+{
+  "session": {
+    "run_id": 1,
+    "blocks": [
+      {
+        "id": "block-1",
+        "message": {
+          "role": "user",
+          "content": "What are my slowest DB queries?"
+        },
+        "timestamp": "2026-05-12T05:39:26Z",
+        "loading": false
+      },
+      {
+        "id": "block-2",
+        "message": {
+          "role": "assistant",
+          "content": "Stub provider response:\n\nWhat are my slowest DB queries?"
+        },
+        "timestamp": "2026-05-12T05:39:26Z",
+        "loading": false
+      }
+    ],
+    "status": "completed",
+    "updated_at": "2026-05-12T05:39:26Z",
+    "owner_user_id": 1,
+    "repo_pr_states": {}
+  }
+}
+```
+
+### `POST /v1/automation/explorer/runs`
+
+Request example:
+
+```json
+{
+  "organization_id": 1,
+  "user_id": 1,
+  "offset": 0,
+  "limit": 10
+}
+```
+
+Response example:
+
+```json
+{
+  "data": [
+    {
+      "run_id": 1,
+      "title": "What are my slowest DB queries?",
+      "last_triggered_at": "2026-05-12T05:39:26Z",
+      "created_at": "2026-05-12T05:39:26Z",
+      "user_id": 1
+    }
+  ]
+}
+```
+
+### `POST /v1/automation/explorer/update`
+
+Request example:
+
+```json
+{
+  "organization_id": 1,
+  "run_id": 1,
+  "payload": {
+    "type": "interrupt"
+  }
+}
+```
+
+Response example:
+
+```json
+{
+  "run_id": 1
+}
+```
+
+### `POST /v1/automation/explorer/state/pr`
+
+Request example:
+
+```json
+{
+  "organization_id": 1,
+  "provider": "github",
+  "pr_id": 123
+}
+```
+
+Response example:
+
+```json
+{
+  "session": null
+}
+```
+
 ## Autofix
 
 ### `POST /v1/automation/autofix/start`

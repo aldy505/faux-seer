@@ -16,6 +16,7 @@ import (
 	"github.com/aldy505/faux-seer/internal/autofix"
 	"github.com/aldy505/faux-seer/internal/config"
 	"github.com/aldy505/faux-seer/internal/db"
+	"github.com/aldy505/faux-seer/internal/explorer"
 	issuesummary "github.com/aldy505/faux-seer/internal/issueSummary"
 	"github.com/aldy505/faux-seer/internal/severity"
 	"github.com/aldy505/faux-seer/internal/similarity"
@@ -27,18 +28,20 @@ type Server struct {
 	log          *slog.Logger
 	store        *db.Store
 	autofix      *autofix.Service
+	explorer     *explorer.Service
 	similarity   *similarity.Service
 	severity     *severity.Service
 	issueSummary *issuesummary.Service
 }
 
 // New creates a server instance.
-func New(cfg *config.Config, logger *slog.Logger, store *db.Store, autofixService *autofix.Service, similarityService *similarity.Service, severityService *severity.Service, issueSummaryService *issuesummary.Service) *Server {
+func New(cfg *config.Config, logger *slog.Logger, store *db.Store, autofixService *autofix.Service, explorerService *explorer.Service, similarityService *similarity.Service, severityService *severity.Service, issueSummaryService *issuesummary.Service) *Server {
 	return &Server{
 		cfg:          cfg,
 		log:          logger,
 		store:        store,
 		autofix:      autofixService,
+		explorer:     explorerService,
 		similarity:   similarityService,
 		severity:     severityService,
 		issueSummary: issueSummaryService,
@@ -58,6 +61,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v1/automation/autofix/prompt", s.withAuth(s.autofixPrompt))
 	mux.HandleFunc("POST /v1/automation/autofix/coding-agent/state/set", s.withAuth(s.codingAgentStateSet))
 	mux.HandleFunc("POST /v1/automation/autofix/coding-agent/state/update", s.withAuth(s.codingAgentStateUpdate))
+	mux.HandleFunc("POST /v1/automation/explorer/chat", s.withAuth(s.explorerChat))
+	mux.HandleFunc("POST /v1/automation/explorer/state", s.withAuth(s.explorerState))
+	mux.HandleFunc("POST /v1/automation/explorer/runs", s.withAuth(s.explorerRuns))
+	mux.HandleFunc("POST /v1/automation/explorer/update", s.withAuth(s.explorerUpdate))
+	mux.HandleFunc("POST /v1/automation/explorer/state/pr", s.withAuth(s.explorerStatePR))
 	mux.HandleFunc("POST /v1/automation/codebase/repo/check-access", s.withAuth(s.repoAccess))
 	mux.HandleFunc("POST /v1/automation/summarize/issue", s.withAuth(s.summarizeIssue))
 	mux.HandleFunc("POST /v1/automation/summarize/trace", s.withAuth(s.summarizeTrace))

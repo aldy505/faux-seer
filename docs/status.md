@@ -9,6 +9,7 @@ The current codebase includes:
 - Sentry-compatible HTTP auth using `Authorization: Rpcsignature rpc0:<hex>`
 - health endpoints
 - autofix start, update, state, prompt, and coding-agent state endpoints
+- minimal explorer chat, state, runs, update, and state/pr endpoints
 - issue summary, trace summary, and fixability endpoints
 - severity score endpoints
 - grouping similarity, grouping record, and supergroup endpoints

@@ -77,6 +77,11 @@ Implemented routes include:
 - `POST /v1/automation/autofix/prompt`
 - `POST /v1/automation/autofix/coding-agent/state/set`
 - `POST /v1/automation/autofix/coding-agent/state/update`
+- `POST /v1/automation/explorer/chat`
+- `POST /v1/automation/explorer/state`
+- `POST /v1/automation/explorer/runs`
+- `POST /v1/automation/explorer/update`
+- `POST /v1/automation/explorer/state/pr`
 - `POST /v1/automation/codebase/repo/check-access`
 - `POST /v1/automation/summarize/issue`
 - `POST /v1/automation/summarize/trace`

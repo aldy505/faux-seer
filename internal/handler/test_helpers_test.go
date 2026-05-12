@@ -12,6 +12,7 @@ import (
 	"github.com/aldy505/faux-seer/internal/autofix"
 	"github.com/aldy505/faux-seer/internal/config"
 	"github.com/aldy505/faux-seer/internal/db"
+	"github.com/aldy505/faux-seer/internal/explorer"
 	issuesummary "github.com/aldy505/faux-seer/internal/issueSummary"
 	"github.com/aldy505/faux-seer/internal/llm"
 	"github.com/aldy505/faux-seer/internal/severity"
@@ -52,6 +53,7 @@ func newTestServerWithMocks(t *testing.T) (*Server, *db.Store, *testutil.MockLLM
 		logger,
 		store,
 		autofix.New(store, llmClient),
+		explorer.New(store, llmClient),
 		similarity.New(cfg, embClient, vectorStore),
 		severity.New(llmClient),
 		issuesummary.New(llmClient),
@@ -74,7 +76,7 @@ func newSQLiteVectorServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatalf("create sqlitevec store: %v", err)
 	}
-	return New(cfg, logger, store, autofix.New(store, llmClient), similarity.New(cfg, embClient, vectorStore), severity.New(llmClient), issuesummary.New(llmClient))
+	return New(cfg, logger, store, autofix.New(store, llmClient), explorer.New(store, llmClient), similarity.New(cfg, embClient, vectorStore), severity.New(llmClient), issuesummary.New(llmClient))
 }
 
 func issueRequest(server *Server, method, target string, payload []byte) *httptest.ResponseRecorder {
