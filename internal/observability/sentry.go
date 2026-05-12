@@ -4,6 +4,7 @@ package observability
 import (
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -53,11 +54,12 @@ func Initialize(ctx context.Context, cfg *config.Config) (*Setup, error) {
 		WaitForDelivery: false,
 		Timeout:         2 * time.Second,
 	})
+	logger := slog.New(multiHandler{handlers: []slog.Handler{baseHandler, logHandler}})
 
 	return &Setup{
-		Logger: slog.New(multiHandler{handlers: []slog.Handler{baseHandler, logHandler}}),
+		Logger: logger,
 		WrapHTTP: func(next http.Handler) http.Handler {
-			return metricMiddleware(meter, httpMiddleware.Handle(next))
+			return requestLoggingMiddleware(logger, metricMiddleware(meter, httpMiddleware.Handle(next)))
 		},
 		Flush:   sentry.Flush,
 		Enabled: cfg.SentryDSN != "",
@@ -143,6 +145,32 @@ func metricMiddleware(meter sentry.Meter, next http.Handler) http.Handler {
 			),
 		)
 	})
+}
+
+func requestLoggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(recorder, r)
+		logger.InfoContext(r.Context(), "http request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", recorder.status,
+			"duration_ms", time.Since(start).Milliseconds(),
+			"remote_addr", clientAddress(r.RemoteAddr),
+		)
+	})
+}
+
+func clientAddress(remoteAddr string) string {
+	if remoteAddr == "" {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err == nil {
+		return host
+	}
+	return remoteAddr
 }
 
 type statusRecorder struct {

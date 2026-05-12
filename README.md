@@ -109,9 +109,9 @@ Core environment variables:
 | Variable | Purpose |
 | --- | --- |
 | `ADDR` | HTTP bind address, default `:9091` |
+| `LOG_LEVEL` | Logging level; `info` emits HTTP access logs, while `warn`/`error` suppress them |
 | `DATABASE_PATH` | SQLite database path, default `data/faux-seer.db` |
 | `SEER_SHARED_SECRET` | Shared HMAC secret for Sentry-compatible RPC signing |
-| `LOG_LEVEL` | Logging level |
 | `VECTOR_STORE` | `sqlitevec` or `pgvector` |
 | `VECTOR_STORE_DSN` | Required when `VECTOR_STORE=pgvector` |
 | `VECTOR_DIMENSIONS` | Embedding/vector width for pgvector storage |
@@ -224,6 +224,14 @@ When `SENTRY_DSN` is set, faux-seer enables:
 - tracing
 - logs via `sentry-go/slog`
 - request metrics via `sentry.NewMeter`
+
+Separately from Sentry observability, faux-seer now emits structured HTTP access logs to stdout for each request at `info` level and below. These log entries include:
+
+- method
+- path
+- status
+- duration in milliseconds
+- remote address
 
 ## Known limitations
 

@@ -181,6 +181,14 @@ This split keeps local setup simple while allowing better vector search when Pos
 - graceful shutdown
 - Sentry SDK initialization and flush
 
+Each request also passes through a structured access-log middleware that emits:
+
+- HTTP method
+- URL path
+- final status code
+- request duration in milliseconds
+- remote address
+
 When `SENTRY_DSN` is configured, faux-seer enables:
 
 - request/error capture
