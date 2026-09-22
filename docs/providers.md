@@ -35,12 +35,20 @@ Notes:
 
 Set `LLM_PROVIDER=openai|openrouter|custom` and `LLM_BASE_URL` as needed. For OpenRouter, set `HTTP_REFERER` because the upstream API expects it.
 
+`LLM_MODEL` and `EMBEDDING_MODEL` take comma-separated lists. Requests rotate round-robin through the
+configured models, so listing several models spreads provider load:
+
+```env
+LLM_MODEL=gpt-4.1-mini,gpt-4.1-nano
+EMBEDDING_MODEL=text-embedding-3-small
+```
+
 OpenAI example:
 
 ```env
 LLM_PROVIDER=openai
 LLM_API_KEY=sk-...
-LLM_MODEL=gpt-4.1-mini
+LLM_MODEL=gpt-4.1-mini,gpt-4.1-nano
 EMBEDDING_PROVIDER=openai
 EMBEDDING_API_KEY=sk-...
 EMBEDDING_MODEL=text-embedding-3-small
@@ -70,7 +78,7 @@ Example:
 ```env
 LLM_PROVIDER=anthropic
 LLM_API_KEY=sk-ant-...
-LLM_MODEL=claude-3-7-sonnet-latest
+LLM_MODEL=claude-3-7-sonnet-latest,claude-3-5-haiku-latest
 EMBEDDING_PROVIDER=stub
 ```
 
@@ -89,5 +97,5 @@ VECTOR_DIMENSIONS=1536
 Notes:
 
 - `pgvector` currently backs similarity/grouping and supergroup storage only.
-- Autofix runs and project preferences remain in the local SQLite app database.
+- Autofix and explorer runs remain in the local SQLite app database.
 - The Postgres user must be able to run `CREATE EXTENSION IF NOT EXISTS vector`.

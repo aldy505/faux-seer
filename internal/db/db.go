@@ -46,16 +46,6 @@ type ExplorerRunRecord struct {
 	LastTriggeredAt string
 }
 
-// ExplorerRunFilter controls explorer run listing.
-type ExplorerRunFilter struct {
-	OrganizationID int64
-	UserID         *int64
-	CategoryKey    *string
-	CategoryValue  *string
-	Offset         int
-	Limit          int
-}
-
 // GroupingRecord stores an embedding for similarity lookup.
 type GroupingRecord struct {
 	ProjectID     int64
@@ -97,13 +87,6 @@ CREATE TABLE IF NOT EXISTS autofix_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_autofix_runs_group_id ON autofix_runs(group_id);
 CREATE INDEX IF NOT EXISTS idx_autofix_runs_pr ON autofix_runs(provider, pr_id);
-
-CREATE TABLE IF NOT EXISTS project_preferences (
-  project_id INTEGER PRIMARY KEY,
-  organization_id INTEGER NOT NULL,
-  preference_json TEXT NOT NULL,
-  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
 
 CREATE TABLE IF NOT EXISTS grouping_records (
   project_id INTEGER NOT NULL,
@@ -335,98 +318,6 @@ func (s *Store) GetExplorerRunByPR(ctx context.Context, organizationID int64, pr
 	}
 	rec.StateJSON = []byte(state)
 	return &rec, nil
-}
-
-// ListExplorerRuns returns explorer runs using compatibility-focused filters.
-func (s *Store) ListExplorerRuns(ctx context.Context, filter ExplorerRunFilter) ([]ExplorerRunRecord, error) {
-	query := `SELECT
-		id, organization_id, user_id, title, category_key, category_value, provider, pr_id, state_json, created_at, last_triggered_at
-	FROM explorer_runs
-	WHERE organization_id = ?`
-	args := []any{filter.OrganizationID}
-	if filter.UserID != nil {
-		query += ` AND user_id = ?`
-		args = append(args, *filter.UserID)
-	}
-	if filter.CategoryKey != nil {
-		query += ` AND category_key = ?`
-		args = append(args, *filter.CategoryKey)
-	}
-	if filter.CategoryValue != nil {
-		query += ` AND category_value = ?`
-		args = append(args, *filter.CategoryValue)
-	}
-	query += ` ORDER BY last_triggered_at DESC, id DESC LIMIT ? OFFSET ?`
-	args = append(args, filter.Limit, filter.Offset)
-	rows, err := s.DB.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("list explorer runs: %w", err)
-	}
-	defer rows.Close()
-	var out []ExplorerRunRecord
-	for rows.Next() {
-		var rec ExplorerRunRecord
-		var state string
-		if err := rows.Scan(
-			&rec.ID,
-			&rec.OrganizationID,
-			&rec.UserID,
-			&rec.Title,
-			&rec.CategoryKey,
-			&rec.CategoryValue,
-			&rec.Provider,
-			&rec.PRID,
-			&state,
-			&rec.CreatedAt,
-			&rec.LastTriggeredAt,
-		); err != nil {
-			return nil, fmt.Errorf("scan explorer run: %w", err)
-		}
-		rec.StateJSON = []byte(state)
-		out = append(out, rec)
-	}
-	return out, rows.Err()
-}
-
-// PutProjectPreference stores a project preference blob.
-func (s *Store) PutProjectPreference(ctx context.Context, projectID, organizationID int64, preference any) error {
-	payload, err := json.Marshal(preference)
-	if err != nil {
-		return fmt.Errorf("marshal preference: %w", err)
-	}
-	_, err = s.DB.ExecContext(ctx, `INSERT INTO project_preferences (project_id, organization_id, preference_json, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(project_id) DO UPDATE SET organization_id = excluded.organization_id, preference_json = excluded.preference_json, updated_at = excluded.updated_at`, projectID, organizationID, string(payload), nowString())
-	if err != nil {
-		return fmt.Errorf("upsert preference: %w", err)
-	}
-	return nil
-}
-
-// GetProjectPreference returns a raw preference blob.
-func (s *Store) GetProjectPreference(ctx context.Context, projectID int64) (json.RawMessage, error) {
-	row := s.DB.QueryRowContext(ctx, `SELECT preference_json FROM project_preferences WHERE project_id = ?`, projectID)
-	var payload string
-	if err := row.Scan(&payload); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("get preference: %w", err)
-	}
-	return json.RawMessage(payload), nil
-}
-
-// ListProjectPreferences returns raw preference blobs for a set of project IDs.
-func (s *Store) ListProjectPreferences(ctx context.Context, projectIDs []int64) (map[int64]json.RawMessage, error) {
-	result := make(map[int64]json.RawMessage, len(projectIDs))
-	for _, projectID := range projectIDs {
-		payload, err := s.GetProjectPreference(ctx, projectID)
-		if err != nil {
-			return nil, err
-		}
-		if payload != nil {
-			result[projectID] = payload
-		}
-	}
-	return result, nil
 }
 
 // UpsertGroupingRecords stores grouping vectors.

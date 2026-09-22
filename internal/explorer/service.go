@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/aldy505/faux-seer/internal/db"
@@ -34,9 +35,9 @@ type StateResponse struct {
 	Session *RunState `json:"session"`
 }
 
-// RunsResponse mirrors the explorer runs response.
+// RunsResponse maps explorer run ids to their live run summaries.
 type RunsResponse struct {
-	Data []AgentRun `json:"data"`
+	Data map[string]AgentRun `json:"data"`
 }
 
 // UpdateResponse mirrors the explorer update response.
@@ -92,6 +93,7 @@ type RunState struct {
 // AgentRun is an AgentRun-compatible subset.
 type AgentRun struct {
 	RunID           int64   `json:"run_id"`
+	Status          string  `json:"status"`
 	Title           string  `json:"title"`
 	LastTriggeredAt string  `json:"last_triggered_at"`
 	CreatedAt       string  `json:"created_at"`
@@ -117,13 +119,8 @@ type stateRequest struct {
 	RunID          int64 `json:"run_id"`
 }
 
-type runsRequest struct {
-	OrganizationID int64   `json:"organization_id"`
-	UserID         *int64  `json:"user_id"`
-	CategoryKey    *string `json:"category_key"`
-	CategoryValue  *string `json:"category_value"`
-	Offset         *int    `json:"offset"`
-	Limit          *int    `json:"limit"`
+type runsByIdsRequest struct {
+	RunIDs []int64 `json:"run_ids"`
 }
 
 type updateRequest struct {
@@ -180,47 +177,38 @@ func (s *Service) GetState(ctx context.Context, raw json.RawMessage) (StateRespo
 	return StateResponse{Session: &state}, nil
 }
 
-// GetRuns lists explorer runs.
-func (s *Service) GetRuns(ctx context.Context, raw json.RawMessage) (RunsResponse, error) {
-	var request runsRequest
+// GetRunsByIDs returns live run summaries for the requested run ids, keyed by
+// run id. Unknown run ids are omitted.
+func (s *Service) GetRunsByIDs(ctx context.Context, raw json.RawMessage) (RunsResponse, error) {
+	var request runsByIdsRequest
 	if err := json.Unmarshal(raw, &request); err != nil {
-		return RunsResponse{}, fmt.Errorf("decode explorer runs request: %w", err)
+		return RunsResponse{}, fmt.Errorf("decode explorer runs by ids request: %w", err)
 	}
-	if request.OrganizationID == 0 {
-		return RunsResponse{}, fmt.Errorf("organization_id is required")
-	}
-	offset := 0
-	if request.Offset != nil && *request.Offset > 0 {
-		offset = *request.Offset
-	}
-	limit := 100
-	if request.Limit != nil && *request.Limit > 0 {
-		limit = *request.Limit
-	}
-	records, err := s.store.ListExplorerRuns(ctx, db.ExplorerRunFilter{
-		OrganizationID: request.OrganizationID,
-		UserID:         request.UserID,
-		CategoryKey:    request.CategoryKey,
-		CategoryValue:  request.CategoryValue,
-		Offset:         offset,
-		Limit:          limit,
-	})
-	if err != nil {
-		return RunsResponse{}, err
-	}
-	runs := make([]AgentRun, 0, len(records))
-	for _, record := range records {
-		runs = append(runs, AgentRun{
+	data := make(map[string]AgentRun, len(request.RunIDs))
+	for _, runID := range request.RunIDs {
+		record, err := s.store.GetExplorerRun(ctx, runID)
+		if err != nil {
+			return RunsResponse{}, err
+		}
+		if record == nil {
+			continue
+		}
+		state, err := decodeRunState(record.StateJSON)
+		if err != nil {
+			return RunsResponse{}, err
+		}
+		data[strconv.FormatInt(record.ID, 10)] = AgentRun{
 			RunID:           record.ID,
+			Status:          state.Status,
 			Title:           record.Title,
 			LastTriggeredAt: record.LastTriggeredAt,
 			CreatedAt:       record.CreatedAt,
 			UserID:          record.UserID,
 			CategoryKey:     record.CategoryKey,
 			CategoryValue:   record.CategoryValue,
-		})
+		}
 	}
-	return RunsResponse{Data: runs}, nil
+	return RunsResponse{Data: data}, nil
 }
 
 // Update applies a compatibility-focused explorer update payload.

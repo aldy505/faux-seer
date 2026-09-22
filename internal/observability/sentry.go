@@ -2,9 +2,10 @@
 package observability
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"time"
@@ -36,16 +37,14 @@ func Initialize(ctx context.Context, cfg *config.Config) (*Setup, error) {
 		AttachStacktrace: true,
 		EnableTracing:    true,
 		TracesSampleRate: cfg.SentryTracesRate,
-		EnableLogs:       true,
 		Debug:            cfg.LogLevel == "debug",
 	}); err != nil {
 		return nil, err
 	}
 
 	logHandler := sentryslog.Option{
-		EventLevel: []slog.Level{slog.LevelError},
-		LogLevel:   []slog.Level{slog.LevelDebug, slog.LevelInfo, slog.LevelWarn, slog.LevelError},
-		AddSource:  cfg.LogLevel == "debug",
+		LogLevel:  []slog.Level{slog.LevelDebug, slog.LevelInfo, slog.LevelWarn, slog.LevelError},
+		AddSource: cfg.LogLevel == "debug",
 	}.NewSentryHandler(ctx)
 
 	meter := sentry.NewMeter(ctx)
@@ -150,27 +149,22 @@ func metricMiddleware(meter sentry.Meter, next http.Handler) http.Handler {
 func requestLoggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			body = nil
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
 		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(recorder, r)
 		logger.InfoContext(r.Context(), "http request",
 			"method", r.Method,
-			"path", r.URL.Path,
+			"url", r.URL.RequestURI(),
+			"headers", r.Header.Clone(),
+			"body", string(body),
 			"status", recorder.status,
 			"duration_ms", time.Since(start).Milliseconds(),
-			"remote_addr", clientAddress(r.RemoteAddr),
 		)
 	})
-}
-
-func clientAddress(remoteAddr string) string {
-	if remoteAddr == "" {
-		return ""
-	}
-	host, _, err := net.SplitHostPort(remoteAddr)
-	if err == nil {
-		return host
-	}
-	return remoteAddr
 }
 
 type statusRecorder struct {

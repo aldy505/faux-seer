@@ -9,13 +9,15 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/aldy505/faux-seer/internal/config"
 )
 
 type anthropicClient struct {
 	httpClient *http.Client
 	baseURL    string
 	apiKey     string
-	model      string
+	models     *config.ModelSelector
 }
 
 type anthropicRequest struct {
@@ -36,15 +38,16 @@ type anthropicResponse struct {
 }
 
 // NewAnthropicClient builds an Anthropic messages API client.
-func NewAnthropicClient(baseURL, apiKey, model string) Client {
+// Model names are rotated round-robin across requests.
+func NewAnthropicClient(baseURL, apiKey string, models []string) Client {
 	if strings.TrimSpace(baseURL) == "" {
 		baseURL = "https://api.anthropic.com/v1"
 	}
-	return &anthropicClient{httpClient: &http.Client{}, baseURL: strings.TrimRight(baseURL, "/"), apiKey: apiKey, model: model}
+	return &anthropicClient{httpClient: &http.Client{}, baseURL: strings.TrimRight(baseURL, "/"), apiKey: apiKey, models: config.NewModelSelector(models)}
 }
 
 func (c *anthropicClient) Complete(ctx context.Context, req CompletionRequest) (string, error) {
-	payload, err := json.Marshal(anthropicRequest{Model: c.model, System: req.SystemPrompt, MaxTokens: req.MaxTokens, Messages: []struct {
+	payload, err := json.Marshal(anthropicRequest{Model: c.models.Next(), System: req.SystemPrompt, MaxTokens: req.MaxTokens, Messages: []struct {
 		Role    string `json:"role"`
 		Content string `json:"content"`
 	}{{Role: "user", Content: req.UserPrompt}}})

@@ -31,6 +31,7 @@ Protected endpoints may return:
 - `200 OK` for successful requests
 - `400 Bad Request` when JSON decoding or request validation fails
 - `401 Unauthorized` when the HMAC header is missing or invalid
+- `404 Not Found` for routes outside the compatibility surface
 
 Error payload shape:
 
@@ -38,59 +39,45 @@ Error payload shape:
 {"error":"decode severity request: unexpected end of JSON input"}
 ```
 
-## Health
+---
+
+## Health (no auth)
 
 ### `GET /health`
+
 ### `GET /health/live`
+
 ### `GET /health/ready`
 
-Response example:
+Response:
 
 ```json
 {"status":"ok"}
 ```
 
-Example:
+---
 
-```bash
-curl -sS http://127.0.0.1:9091/health
-```
+## Agent and explorer runs
 
-## Repo access
+### `POST /v1/automation/agent/feature/run`
 
-### `POST /v1/automation/codebase/repo/check-access`
+Acknowledgement stub. faux-seer runs no agent features; Sentry's outbox only requires a non-null `run_id` in the response.
 
 Request example:
 
 ```json
-{
-  "repo": {
-    "provider": "github",
-    "owner": "acme",
-    "name": "app",
-    "external_id": "42"
-  }
-}
+{"feature_id": "explorer", "payload": {"query": "hello"}}
 ```
 
-Response example:
+Response:
 
 ```json
-{"has_access":true}
+{"success":true,"run_id":1}
 ```
-
-Example:
-
-```bash
-BODY='{"repo":{"provider":"github","owner":"acme","name":"app","external_id":"42"}}'
-AUTH="Rpcsignature rpc0:$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$SEER_SHARED_SECRET" -binary | xxd -p -c 256)"
-curl -sS -H "Content-Type: application/json" -H "Authorization: $AUTH" -d "$BODY" \
-  http://127.0.0.1:9091/v1/automation/codebase/repo/check-access
-```
-
-## Explorer
 
 ### `POST /v1/automation/explorer/chat`
+
+Real. Persists a run and calls the configured LLM.
 
 Request example:
 
@@ -106,28 +93,23 @@ Request example:
 }
 ```
 
-Response example:
+Response:
 
 ```json
-{
-  "run_id": 1,
-  "has_explorer_index": true,
-  "has_org_project_context": true
-}
+{"run_id":1,"has_explorer_index":true,"has_org_project_context":true}
 ```
 
 ### `POST /v1/automation/explorer/state`
 
+Real. Returns the stored run state. Sentry builds a pydantic `SeerRunState` requiring `run_id`, `blocks[]`, `status`, and `updated_at`.
+
 Request example:
 
 ```json
-{
-  "organization_id": 1,
-  "run_id": 1
-}
+{"organization_id": 1, "run_id": 1}
 ```
 
-Response example:
+Response:
 
 ```json
 {
@@ -161,226 +143,184 @@ Response example:
 }
 ```
 
-### `POST /v1/automation/explorer/runs`
+### `POST /v1/automation/explorer/state/pr`
+
+Real. Returns the stored run state for a PR-scoped session, or `null` if no session exists.
 
 Request example:
 
 ```json
-{
-  "organization_id": 1,
-  "user_id": 1,
-  "offset": 0,
-  "limit": 10
-}
+{"organization_id": 1, "provider": "github", "pr_id": 123}
 ```
 
-Response example:
+Response:
+
+```json
+{"session": null}
+```
+
+### `POST /v1/automation/explorer/runs/by-ids`
+
+Real. Returns live run summaries keyed by run id. Unknown run ids are omitted.
+
+Request example:
+
+```json
+{"run_ids": [1, 2]}
+```
+
+Response:
 
 ```json
 {
-  "data": [
-    {
+  "data": {
+    "1": {
       "run_id": 1,
+      "status": "completed",
       "title": "What are my slowest DB queries?",
       "last_triggered_at": "2026-05-12T05:39:26Z",
       "created_at": "2026-05-12T05:39:26Z",
       "user_id": 1
     }
-  ]
+  }
 }
+```
+
+### `POST /v1/automation/explorer/repos`
+
+Stub. faux-seer stores no repository selection.
+
+Request example:
+
+```json
+{"run_id": 1, "organization_id": 1}
+```
+
+Response:
+
+```json
+{"repos":[]}
 ```
 
 ### `POST /v1/automation/explorer/update`
 
-Request example:
-
-```json
-{
-  "organization_id": 1,
-  "run_id": 1,
-  "payload": {
-    "type": "interrupt"
-  }
-}
-```
-
-Response example:
-
-```json
-{
-  "run_id": 1
-}
-```
-
-### `POST /v1/automation/explorer/state/pr`
+Real. Mutates run state for interrupts, user input responses, and created PRs.
 
 Request example:
 
 ```json
-{
-  "organization_id": 1,
-  "provider": "github",
-  "pr_id": 123
-}
+{"organization_id": 1, "run_id": 1, "payload": {"type": "interrupt"}}
 ```
 
-Response example:
+Response:
 
 ```json
-{
-  "session": null
-}
+{"run_id":1}
 ```
 
-## Autofix
+### `POST /v1/automation/explorer/index`
 
-### `POST /v1/automation/autofix/start`
+Ack stub. faux-seer keeps no search index; any JSON body is accepted and success is reported immediately.
 
 Request example:
 
 ```json
-{
-  "organization_id": 1,
-  "project_id": 2,
-  "issue": {
-    "id": 123,
-    "title": "TypeError in checkout"
-  },
-  "repos": [
-    {
-      "provider": "github",
-      "owner": "acme",
-      "name": "app",
-      "external_id": "42"
-    }
-  ]
-}
+{"org_id": 1}
 ```
 
-Response example:
+Response:
 
 ```json
-{"started":true,"run_id":1}
+{"success":true}
 ```
 
-Example:
+### `POST /v1/automation/explorer/index/org-repo-knowledge`
 
-```bash
-BODY='{"organization_id":1,"project_id":2,"issue":{"id":123,"title":"TypeError in checkout"},"repos":[{"provider":"github","owner":"acme","name":"app","external_id":"42"}]}'
-AUTH="Rpcsignature rpc0:$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac "$SEER_SHARED_SECRET" -binary | xxd -p -c 256)"
-curl -sS -H "Content-Type: application/json" -H "Authorization: $AUTH" -d "$BODY" \
-  http://127.0.0.1:9091/v1/automation/autofix/start
-```
-
-### `POST /v1/automation/autofix/update`
+Ack stub.
 
 Request example:
 
 ```json
-{
-  "run_id": 1,
-  "payload": {
-    "type": "create_pr",
-    "repo_external_id": "42",
-    "make_pr": true
-  }
-}
+{"org_id": 1}
 ```
 
-Response example:
+Response:
 
 ```json
-{"run_id":1,"status":"success"}
+{"success":true}
 ```
 
-### `POST /v1/automation/autofix/state`
+### `POST /v1/automation/explorer/index/org-project-knowledge`
+
+Ack stub.
 
 Request example:
 
 ```json
-{
-  "run_id": 1,
-  "group_id": 123,
-  "check_repo_access": false,
-  "is_user_fetching": true
-}
+{"org_id": 1}
 ```
 
-Response example:
+Response:
 
 ```json
-{
-  "group_id": 123,
-  "run_id": 1,
-  "state": {
-    "run_id": 1,
-    "status": "COMPLETED",
-    "steps": [
-      {
-        "key": "root_cause_analysis",
-        "status": "COMPLETED"
-      }
-    ],
-    "codebases": {
-      "42": {
-        "repo_external_id": "42",
-        "file_changes": [],
-        "is_readable": true,
-        "is_writeable": true
-      }
-    },
-    "request": {
-      "organization_id": 1,
-      "project_id": 2
-    }
-  }
-}
+{"success":true}
 ```
 
-### `POST /v1/automation/autofix/state/pr`
+### `POST /v1/automation/explorer/index/sentry-knowledge`
+
+Ack stub.
 
 Request example:
 
 ```json
-{
-  "provider": "42",
-  "pr_id": 1711898354
-}
+{"org_id": 1}
 ```
 
-Response example:
+Response:
 
 ```json
-{
-  "group_id": 123,
-  "run_id": 1,
-  "state": {
-    "status": "COMPLETED"
-  }
-}
+{"success":true}
 ```
 
-### `POST /v1/automation/autofix/prompt`
+### `POST /v1/automation/explorer/export-indexes`
+
+Ack stub.
 
 Request example:
 
 ```json
-{
-  "run_id": 1,
-  "include_root_cause": true,
-  "include_solution": true
-}
+{"org_id": 1}
 ```
 
-Response example:
+Response:
 
 ```json
-{
-  "prompt": "Please fix the following issue. Ensure that your fix is fully working.\n\nIssue: TypeError in checkout\n\nRepositories: acme/app\n\nRoot cause: Compatibility mode generated a placeholder root-cause analysis from the issue payload.\n\nSolution: Inspect the failing path, implement the smallest safe fix, and add or update tests if needed."
-}
+{"success":true}
 ```
+
+### `POST /v1/explorer/service-map/update`
+
+Status-only consumer.
+
+Request example:
+
+```json
+{"any_key": "any_value"}
+```
+
+Response:
+
+```json
+{"success":true}
+```
+
+---
+
+## Autofix and codegen
 
 ### `POST /v1/automation/autofix/coding-agent/state/set`
+
+Real. Persists coding-agent state onto an existing run.
 
 Request example:
 
@@ -397,13 +337,17 @@ Request example:
 }
 ```
 
-Response example:
+Response:
 
 ```json
 {"run_id":1,"status":"success"}
 ```
 
+Unknown `run_id` returns `{"run_id":1,"status":"error","message":"run not found"}` with status `200`.
+
 ### `POST /v1/automation/autofix/coding-agent/state/update`
+
+Real. Merges an update into one agent entry.
 
 Request example:
 
@@ -417,422 +361,720 @@ Request example:
 }
 ```
 
-Response example:
+Response:
 
 ```json
 {"run_id":1,"status":"success"}
 ```
 
-## Summaries
+Unknown `agent_id` returns `{"run_id":0,"status":"error","message":"agent not found"}` with status `200`.
 
-### `POST /v1/automation/summarize/issue`
+### `POST /v1/automation/codegen/unit-tests`
+
+Status-only consumer.
 
 Request example:
 
 ```json
-{
-  "group_id": "123",
-  "issue": {
-    "title": "TypeError in checkout"
-  },
-  "trace_tree": {
-    "id": "trace-1"
-  }
-}
+{"any_key": "any_value"}
 ```
 
-Response example:
+Response:
+
+```json
+{"success":true}
+```
+
+### `POST /v1/automation/oneshot/run`
+
+Stub. Callers extract keys from `result`.
+
+Request example:
+
+```json
+{"oneshot_id": 1, "payload": {"type": "test"}}
+```
+
+Response:
+
+```json
+{"result":{}}
+```
+
+---
+
+## Summaries
+
+### `POST /v1/automation/summarize/issue`
+
+Real. Calls the configured LLM for prose.
+
+Request example:
+
+```json
+{"group_id": 1, "issue": {"title": "TypeError"}, "trace_tree": null}
+```
+
+Response:
 
 ```json
 {
-  "group_id": "123",
-  "headline": "TypeError in checkout",
-  "whats_wrong": "Stub provider response:\n\nSummarize this issue for an engineer.",
-  "trace": "Trace context is available and should be reviewed alongside the issue.",
-  "possible_cause": "Inspect the top in-app frames and recent deploys affecting the failing code path.",
-  "scores": {
-    "possible_cause_confidence": 0.42,
-    "possible_cause_novelty": 0.31,
-    "fixability_score": 0.58,
-    "fixability_score_version": 1,
-    "is_fixable": true
-  }
+  "group_id": 1,
+  "headline": "TypeError in foo()",
+  "whats_wrong": "A nil pointer was dereferenced.",
+  "trace": "main → foo → bar",
+  "possible_cause": "Uninitialized variable.",
+  "scores": {"likelihood": 0.8, "impact": 0.9}
 }
 ```
 
 ### `POST /v1/automation/summarize/trace`
 
+Heuristic.
+
 Request example:
 
 ```json
-{
-  "trace_id": "abc123"
-}
+{"trace_id": "abc123", "trace": null}
 ```
 
-Response example:
+Response:
 
 ```json
 {
   "trace_id": "abc123",
-  "summary": "Trace contains a slow or failing execution path that should be inspected span-by-span.",
-  "key_observations": "Review the longest-running spans, error spans, and service boundaries.",
-  "performance_characteristics": "Look for concentrated latency in the critical path and repeated downstream calls.",
-  "suggested_investigations": [
-    {
-      "explanation": "Inspect the slowest transaction span and its child spans.",
-      "span_id": "compat-span-1",
-      "span_op": "http.server"
-    }
-  ]
+  "summary": "Trace spans indicate slow DB queries.",
+  "key_observations": ["High latency in SELECT"],
+  "performance_characteristics": {"p99_ms": 1200},
+  "suggested_investigations": ["Check indexing"]
 }
 ```
 
 ### `POST /v1/automation/summarize/fixability`
 
-Request example:
-
-```json
-{
-  "group_id": "123"
-}
-```
-
-Response example:
-
-```json
-{
-  "group_id": "123",
-  "headline": "Fixability assessment",
-  "whats_wrong": "Compatibility mode returned a heuristic fixability score.",
-  "trace": "Detailed trace analysis is not available in heuristic mode.",
-  "possible_cause": "This issue appears actionable if you can reproduce it locally or from stacktrace context.",
-  "scores": {
-    "fixability_score": 0.61,
-    "fixability_score_version": 1,
-    "is_fixable": true
-  }
-}
-```
-
-## Project preferences
-
-### `POST /v1/project-preference`
+Heuristic.
 
 Request example:
 
 ```json
-{"project_id":2}
+{"group_id": 1}
 ```
 
-Response example:
+Response:
 
 ```json
 {
-  "preference": {
-    "organization_id": 1,
-    "project_id": 2,
-    "repositories": []
-  }
+  "group_id": 1,
+  "headline": "TypeError in foo()",
+  "whats_wrong": "A nil pointer was dereferenced.",
+  "trace": "main → foo → bar",
+  "possible_cause": "Uninitialized variable.",
+  "scores": {"likelihood": 0.8, "impact": 0.9}
 }
 ```
 
-### `POST /v1/project-preference/set`
+### `POST /v1/automation/summarize/feedback/spam-detection`
+
+Stub. `is_spam` must be a JSON bool.
 
 Request example:
 
 ```json
-{
-  "preference": {
-    "organization_id": 1,
-    "project_id": 2,
-    "repositories": [
-      {
-        "provider": "github",
-        "owner": "acme",
-        "name": "app",
-        "external_id": "42"
-      }
-    ]
-  }
-}
+{"organization_id": 1, "feedback_message": "Great app!"}
 ```
 
-Response example:
+Response:
 
 ```json
-{
-  "preference": {
-    "organization_id": 1,
-    "project_id": 2,
-    "repositories": [
-      {
-        "provider": "github",
-        "owner": "acme",
-        "name": "app",
-        "external_id": "42"
-      }
-    ]
-  }
-}
+{"is_spam":false}
 ```
 
-### `POST /v1/project-preference/bulk`
+### `POST /v1/automation/summarize/feedback/labels`
+
+Stub. Nested object required.
 
 Request example:
 
 ```json
-{"project_ids":[2,3]}
+{"organization_id": 1, "feedback_message": "The login page is broken."}
 ```
 
-Response example:
+Response:
 
 ```json
-{
-  "preferences": [
-    {
-      "organization_id": 1,
-      "project_id": 2,
-      "repositories": []
-    }
-  ]
-}
+{"data":{"labels":[]}}
 ```
 
-### `POST /v1/project-preference/bulk-set`
+### `POST /v1/automation/summarize/feedback/title`
+
+Derived from the message.
 
 Request example:
 
 ```json
-{
-  "preferences": [
-    {
-      "organization_id": 1,
-      "project_id": 2,
-      "repositories": []
-    },
-    {
-      "organization_id": 1,
-      "project_id": 3,
-      "repositories": []
-    }
-  ]
-}
+{"organization_id": 1, "feedback_message": "The login page is broken."}
 ```
 
-Response example:
+Response:
 
 ```json
-{
-  "preferences": [
-    {
-      "organization_id": 1,
-      "project_id": 2,
-      "repositories": []
-    },
-    {
-      "organization_id": 1,
-      "project_id": 3,
-      "repositories": []
-    }
-  ]
-}
+{"title":"The login page is broken."}
 ```
 
-### `POST /v1/project-preference/remove-repository`
+### `POST /v1/automation/summarize/feedback/label-groups`
+
+One entry per requested label.
 
 Request example:
 
 ```json
-{
-  "organization_id": 1,
-  "repo_provider": "github",
-  "repo_external_id": "42"
-}
+{"labels": ["bug", "feature"]}
 ```
 
-Response example:
+Response:
+
+```json
+{"data":[{"primaryLabel":"bug","associatedLabels":[]},{"primaryLabel":"feature","associatedLabels":[]}]}
+```
+
+### `POST /v1/automation/summarize/feedback/summarize`
+
+Deterministic.
+
+Request example:
+
+```json
+{"feedbacks": [{"message": "App crashes"}, {"message": "Slow loading"}]}
+```
+
+Response:
+
+```json
+{"data":"Compatibility summary of 2 user feedback items."}
+```
+
+### `POST /v1/automation/summarize/replay/breadcrumbs/start`
+
+Frontend-facing shape.
+
+Request example:
+
+```json
+{"replay_id": 1, "num_segments": 3}
+```
+
+Response:
+
+```json
+{"created_at":"2026-05-12T05:39:26Z","status":"completed","num_segments":3,"data":{"summary":"Breadcrumbs summarized.","time_ranges":[]}}
+```
+
+### `POST /v1/automation/summarize/replay/breadcrumbs/state`
+
+Polled by the frontend. Status is a lowercase enum: `processing`, `completed`, `error`, `not_started`. Returns the same shape as `start`.
+
+Request example:
+
+```json
+{"replay_id": 1, "organization_id": 1, "project_id": 1}
+```
+
+Response:
+
+```json
+{"created_at":"2026-05-12T05:39:26Z","status":"completed","num_segments":null,"data":{"summary":"Breadcrumbs summarized.","time_ranges":[]}}
+```
+
+### `POST /v1/automation/summarize/replay/breadcrumbs/delete`
+
+Status-only consumer.
+
+Request example:
+
+```json
+{"replay_ids": [1, 2], "organization_id": 1, "project_id": 1}
+```
+
+Response:
 
 ```json
 {"success":true}
 ```
 
-## Similarity and grouping
+---
+
+## Investigations
+
+### `POST /v1/automation/investigations`
+
+Stub. Sentry validates `runId >= 1`, `created` bool, and `projection` dict.
+
+Request example:
+
+```json
+{"requestId": "550e8400-e29b-41d4-a716-446655440000", "investigationId": "inv-1", "source": "seer", "activeTimeBudgetSeconds": 30}
+```
+
+Response:
+
+```json
+{"runId":1,"created":true,"projection":{}}
+```
+
+### `POST /v1/automation/investigations/{run_id}/commands`
+
+Stub. `accepted` must be exactly `true`. `requestId` is echoed when it parses as UUID, else a fresh v4 is generated.
+
+Request example:
+
+```json
+{"requestId": "550e8400-e29b-41d4-a716-446655440000", "expectedWorkflowVersion": 1, "command": {"type": "step"}}
+```
+
+Response:
+
+```json
+{"runId":1,"requestId":"550e8400-e29b-41d4-a716-446655440000","accepted":true,"duplicate":false,"workflowVersion":1,"projection":{}}
+```
+
+### `GET /v1/automation/investigations/{run_id}`
+
+Stub.
+
+Response:
+
+```json
+{"runId":1,"created":true,"projection":{}}
+```
+
+---
+
+## Issue detection
+
+### `POST /v1/automation/issue-detection/analyze`
+
+Returns **202** (not 200). The response body is never parsed by Sentry.
+
+Request example:
+
+```json
+{"traces": [{"trace_id": "abc123"}], "organization_id": 1, "project_id": 1, "org_slug": "acme", "plan_tier": "business"}
+```
+
+Response (HTTP 202):
+
+```json
+{"success":true}
+```
+
+### `GET /v1/automation/issue-detection/check-budget/{org_id}?plan_tier=`
+
+Sentry fails open when absent.
+
+Response:
+
+```json
+{"has_budget":true}
+```
+
+---
+
+## Assisted query
+
+### `POST /v1/assisted-query/start`
+
+Sentry's outbox reads `run_id`.
+
+Response:
+
+```json
+{"run_id":1}
+```
+
+### `POST /v1/assisted-query/state`
+
+Passthrough to frontend.
+
+Response:
+
+```json
+{
+  "session": {
+    "run_id": 1,
+    "status": "completed",
+    "current_step": null,
+    "completed_steps": [],
+    "updated_at": "2026-05-12T05:39:26Z",
+    "final_response": null,
+    "unsupported_reason": null
+  }
+}
+```
+
+### `POST /v1/assisted-query/translate`
+
+Consumer reads `responses` and `unsupported_reason`.
+
+Response:
+
+```json
+{"responses":[],"unsupported_reason":null}
+```
+
+### `POST /v1/assisted-query/translate-agentic`
+
+Passthrough to frontend.
+
+Response:
+
+```json
+{"responses":[],"unsupported_reason":null}
+```
+
+### `POST /v1/assisted-query/create-cache`
+
+Status-only consumer.
+
+Response:
+
+```json
+{"success":true}
+```
+
+---
+
+## Anomaly detection, breakpoints, workflows
+
+### `POST /v1/anomaly-detection/detect`
+
+Empty `timeseries` means no anomalies.
+
+Response:
+
+```json
+{"success":true,"timeseries":[]}
+```
+
+### `POST /v1/anomaly-detection/alert-data`
+
+Empty `data` means no threshold data.
+
+Response:
+
+```json
+{"success":true,"data":[]}
+```
+
+### `POST /v1/anomaly-detection/store`
+
+Consumer raises only if `success` is falsy.
+
+Response:
+
+```json
+{"success":true}
+```
+
+### `POST /v1/anomaly-detection/delete-alert-data`
+
+Consumer requires `success` is true.
+
+Response:
+
+```json
+{"success":true}
+```
+
+### `POST /v1/workflows/compare/cohort`
+
+Consumer iterates `results`.
+
+Response:
+
+```json
+{"results":[]}
+```
+
+### `POST /trends/breakpoint-detector`
+
+Empty `data` means no breakpoints detected.
+
+Response:
+
+```json
+{"data":[]}
+```
+
+---
+
+## Code review, offboarding, PR metrics
+
+### `POST /v1/code_review/check/rerun`
+
+Status-only consumer.
+
+Response:
+
+```json
+{"success":true}
+```
+
+### `POST /v1/code_review/review-request`
+
+Status-only consumer.
+
+Response:
+
+```json
+{"success":true}
+```
+
+### `POST /v1/code_review/pr-closed`
+
+Status-only consumer.
+
+Response:
+
+```json
+{"success":true}
+```
+
+### `POST /v1/offboarding/repository`
+
+Status-only consumer.
+
+Response:
+
+```json
+{"success":true}
+```
+
+### `POST /v1/pr-metrics/delegated-agent-match`
+
+Returns **202** (not 200). 202 means "no synchronous match"; returning 200 would require real run/agent state.
+
+Response (HTTP 202):
+
+```json
+{"success":true}
+```
+
+### `POST /v1/pr-metrics/pr-close-judge`
+
+Status-only; the verdict arrives later via callback.
+
+Response:
+
+```json
+{"success":true}
+```
+
+---
+
+## Grouping, supergroups, severity, models, monitoring
 
 ### `POST /v0/issues/similar-issues`
 
-Request example:
-
-```json
-{
-  "project_id": 1,
-  "stacktrace": "TypeError: undefined is not a function",
-  "hash": "grouping-hash",
-  "k": 3,
-  "threshold": 0.1
-}
-```
-
-Response example:
-
-```json
-{
-  "responses": [
-    {
-      "parent_hash": "existing-hash",
-      "stacktrace_distance": 0.04,
-      "should_group": true
-    }
-  ],
-  "model_used": "text-embedding-3-small"
-}
-```
-
-### `POST /v0/issues/similar-issues/grouping-record`
+Real vector search. `training_mode` causes upsert instead of search.
 
 Request example:
 
 ```json
-{
-  "data": [
-    {
-      "group_id": 1,
-      "hash": "existing-hash",
-      "project_id": 1,
-      "exception_type": "TypeError"
-    }
-  ],
-  "stacktrace_list": [
-    "TypeError: undefined is not a function"
-  ],
-  "k": 1,
-  "threshold": 0.1
-}
+{"project_id": 1, "stacktrace": "Traceback...", "hash": "abc123", "k": 5, "threshold": 0.5, "training_mode": false}
 ```
 
-Response example:
+Response:
 
 ```json
-{
-  "success": true,
-  "groups_with_neighbor": {}
-}
+{"responses":[{"parent_hash":"def456","stacktrace_distance":0.2,"should_group":true}],"model_used":"text-embedding-3-small"}
 ```
 
 ### `GET /v0/issues/similar-issues/grouping-record/delete/{project_id}`
 
-Path parameters:
+Real delete.
 
-- `project_id`: numeric Sentry project ID
-
-Response example:
+Response:
 
 ```json
 {"success":true}
-```
-
-Example:
-
-```bash
-AUTH="Rpcsignature rpc0:$(printf '' | openssl dgst -sha256 -hmac "$SEER_SHARED_SECRET" -binary | xxd -p -c 256)"
-curl -sS -H "Authorization: $AUTH" \
-  http://127.0.0.1:9091/v0/issues/similar-issues/grouping-record/delete/1
 ```
 
 ### `POST /v0/issues/similar-issues/grouping-record/delete-by-hash`
 
+Real delete.
+
 Request example:
 
 ```json
-{
-  "project_id": 1,
-  "hash_list": ["existing-hash"]
-}
+{"project_id": 1, "hash_list": ["abc123", "def456"]}
 ```
 
-Response example:
+Response:
 
 ```json
 {"success":true}
 ```
 
-## Supergroups
+### `POST /v0/issues/supergroups/cluster-lightweight`
 
-### `POST /v0/issues/supergroups`
+Ack stub. No clustering performed.
 
 Request example:
 
 ```json
-{
-  "organization_id": 1,
-  "group_id": 10,
-  "project_id": 2,
-  "artifact_data": {
-    "kind": "compat-supergroup",
-    "title": "Checkout failures"
-  }
-}
+{"organization_id": 1, "group_id": 1, "issue": {"title": "TypeError"}}
 ```
 
-Response example:
+Response:
 
 ```json
 {"success":true}
 ```
 
-### `POST /v0/issues/supergroups/list`
 ### `POST /v0/issues/supergroups/get`
+
+Real read from the vector store; data is never null.
+
+Request example:
+
+```json
+{"organization_id": 1, "supergroup_id": 1}
+```
+
+Response:
+
+```json
+{"data":[...]}
+```
+
 ### `POST /v0/issues/supergroups/get-by-group-ids`
 
-All three paths currently share the same list behavior in faux-seer.
+Real read.
 
 Request example:
 
 ```json
-{
-  "organization_id": 1,
-  "project_ids": [2],
-  "offset": 0,
-  "limit": 50
-}
+{"organization_id": 1, "group_ids": [1, 2, 3]}
 ```
 
-Response example:
+Response:
 
 ```json
-{
-  "data": [
-    {
-      "kind": "compat-supergroup",
-      "title": "Checkout failures"
-    }
-  ]
-}
+{"data":[...]}
 ```
-
-## Severity
 
 ### `POST /v0/issues/severity-score`
-### `POST /v1/issues/severity-score`
+
+Deterministic heuristic. Severity is clamped to `[0, 1]`.
 
 Request example:
 
 ```json
-{
-  "message": "panic: nil pointer dereference",
-  "has_stacktrace": 1,
-  "handled": false
-}
+{"message": "panic: nil pointer dereference", "has_stacktrace": 1, "handled": false}
 ```
 
-Response example:
+Response:
 
 ```json
-{"severity":0.73}
+{"severity":0.75}
 ```
 
-Behavior notes:
+### `GET /v1/models`
 
-- faux-seer currently computes a deterministic heuristic score
-- scores are clamped to `[0, 1]`
-- the same implementation serves both `/v0` and `/v1`
+From config. Sentry caches it for 10 minutes.
+
+Response:
+
+```json
+{"models":["gpt-4.1-mini"]}
+```
+
+### `POST /v1/llm/generate`
+
+Stub. Consumers parse `content` as JSON and handle failure.
+
+Request example:
+
+```json
+{"referrer": "test", "prompt": "Hello"}
+```
+
+Response:
+
+```json
+{"content":"","model":""}
+```
+
+### `POST /v1/monitoring-providers/gcp/verify-connection`
+
+Simulated. No GCP verification is performed.
+
+Request example:
+
+```json
+{"sentry_sa_email": "sentry@acme.iam.gserviceaccount.com", "customer_sa_email": "dev@acme.iam.gserviceaccount.com", "gcp_project_ids": ["acme-prod"]}
+```
+
+Response:
+
+```json
+{"connection_status":"connected","projects":[{"gcp_project_id":"acme-prod","connection_status":"connected","services":[],"error_detail":null}],"error_detail":null}
+```
+
+---
+
+## Project preference maintenance
+
+### `POST /v1/project-preference/remove-repository`
+
+Ack stub. No preferences stored.
+
+Response:
+
+```json
+{"success":true}
+```
+
+### `POST /v1/project-preference/bulk-remove-repositories`
+
+Ack stub.
+
+Response:
+
+```json
+{"success":true}
+```
+
+### `POST /v1/project-preference/remove-handoffs-for-integration`
+
+Ack stub.
+
+Response:
+
+```json
+{"success":true}
+```
+
+---
+
+## Deliberately not served (404)
+
+These paths appear nowhere in Sentry's Seer client layer and return `404`:
+
+- `/v1/automation/autofix/start`
+- `/v1/automation/autofix/update`
+- `/v1/automation/autofix/state`
+- `/v1/automation/autofix/state/pr`
+- `/v1/automation/autofix/prompt`
+- `/v1/automation/codebase/repo/check-access`
+- `/v1/issues/severity-score`
+- `/v1/project-preference`
+- `/v1/project-preference/set`
+- `/v1/project-preference/bulk`
+- `/v1/project-preference/bulk-set`
+- `POST /v0/issues/similar-issues/grouping-record`
+- `POST /v0/issues/supergroups`
+- `POST /v0/issues/supergroups/list`
+- `POST /v1/automation/explorer/runs`
+
+`internal/handler/routes_test.go` pins both halves of this contract.

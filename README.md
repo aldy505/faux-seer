@@ -1,6 +1,6 @@
 # faux-seer
 
-`faux-seer` is a self-hosted, Go-based compatibility layer for Sentry's Seer service. It implements the signed HTTP endpoints Sentry expects for autofix, summaries, similarity, severity, and project preferences, while delegating text generation and embeddings to configurable providers or safe local stubs.
+`faux-seer` is a self-hosted, Go-based compatibility layer for Sentry's Seer service. It implements the signed HTTP endpoints Sentry expects for the Explorer agent, autofix coding-agent state, summaries, similarity, supergroups, and severity, while delegating text generation and embeddings to configurable providers or safe local stubs.
 
 The goal is wire compatibility with Sentry's Seer integration, not a full reimplementation of Seer's Python internals.
 
@@ -65,36 +65,101 @@ The signature is HMAC-SHA256 over the raw request body.
 
 ## Implemented compatibility surface
 
-Implemented routes include:
+Implemented routes are exactly the paths Sentry's Seer client can call. Health:
 
 - `GET /health`
 - `GET /health/live`
 - `GET /health/ready`
-- `POST /v1/automation/autofix/start`
-- `POST /v1/automation/autofix/update`
-- `POST /v1/automation/autofix/state`
-- `POST /v1/automation/autofix/state/pr`
-- `POST /v1/automation/autofix/prompt`
-- `POST /v1/automation/autofix/coding-agent/state/set`
-- `POST /v1/automation/autofix/coding-agent/state/update`
+
+Agent and explorer runs:
+
+- `POST /v1/automation/agent/feature/run`
 - `POST /v1/automation/explorer/chat`
 - `POST /v1/automation/explorer/state`
-- `POST /v1/automation/explorer/runs`
-- `POST /v1/automation/explorer/update`
 - `POST /v1/automation/explorer/state/pr`
-- `POST /v1/automation/codebase/repo/check-access`
+- `POST /v1/automation/explorer/runs/by-ids`
+- `POST /v1/automation/explorer/repos`
+- `POST /v1/automation/explorer/update`
+- `POST /v1/automation/explorer/index`
+- `POST /v1/automation/explorer/index/org-repo-knowledge`
+- `POST /v1/automation/explorer/index/org-project-knowledge`
+- `POST /v1/automation/explorer/index/sentry-knowledge`
+- `POST /v1/automation/explorer/export-indexes`
+- `POST /v1/explorer/service-map/update`
+
+Autofix and codegen:
+
+- `POST /v1/automation/autofix/coding-agent/state/set`
+- `POST /v1/automation/autofix/coding-agent/state/update`
+- `POST /v1/automation/codegen/unit-tests`
+- `POST /v1/automation/oneshot/run`
+
+Summaries:
+
 - `POST /v1/automation/summarize/issue`
 - `POST /v1/automation/summarize/trace`
 - `POST /v1/automation/summarize/fixability`
-- `POST /v1/project-preference`
-- `POST /v1/project-preference/set`
-- `POST /v1/project-preference/bulk`
-- `POST /v1/project-preference/bulk-set`
-- `POST /v1/project-preference/remove-repository`
+- `POST /v1/automation/summarize/feedback/spam-detection`
+- `POST /v1/automation/summarize/feedback/labels`
+- `POST /v1/automation/summarize/feedback/title`
+- `POST /v1/automation/summarize/feedback/label-groups`
+- `POST /v1/automation/summarize/feedback/summarize`
+- `POST /v1/automation/summarize/replay/breadcrumbs/start`
+- `POST /v1/automation/summarize/replay/breadcrumbs/state`
+- `POST /v1/automation/summarize/replay/breadcrumbs/delete`
+
+Investigations and issue detection:
+
+- `POST /v1/automation/investigations`
+- `POST /v1/automation/investigations/{run_id}/commands`
+- `GET /v1/automation/investigations/{run_id}`
+- `POST /v1/automation/issue-detection/analyze`
+- `GET /v1/automation/issue-detection/check-budget/{org_id}`
+
+Assisted query:
+
+- `POST /v1/assisted-query/state`
+- `POST /v1/assisted-query/start`
+- `POST /v1/assisted-query/translate`
+- `POST /v1/assisted-query/translate-agentic`
+- `POST /v1/assisted-query/create-cache`
+
+Anomaly detection, breakpoints, and workflows:
+
+- `POST /v1/anomaly-detection/detect`
+- `POST /v1/anomaly-detection/alert-data`
+- `POST /v1/anomaly-detection/store`
+- `POST /v1/anomaly-detection/delete-alert-data`
+- `POST /v1/workflows/compare/cohort`
+- `POST /trends/breakpoint-detector`
+
+Code review, offboarding, and PR metrics:
+
+- `POST /v1/code_review/check/rerun`
+- `POST /v1/code_review/review-request`
+- `POST /v1/code_review/pr-closed`
+- `POST /v1/offboarding/repository`
+- `POST /v1/pr-metrics/delegated-agent-match`
+- `POST /v1/pr-metrics/pr-close-judge`
+
+Grouping, supergroups, severity, models, and monitoring providers:
+
 - `POST /v0/issues/similar-issues`
-- grouping record and supergroup endpoints under `/v0/issues/...`
+- `GET /v0/issues/similar-issues/grouping-record/delete/{project_id}`
+- `POST /v0/issues/similar-issues/grouping-record/delete-by-hash`
+- `POST /v0/issues/supergroups/cluster-lightweight`
+- `POST /v0/issues/supergroups/get`
+- `POST /v0/issues/supergroups/get-by-group-ids`
 - `POST /v0/issues/severity-score`
-- `POST /v1/issues/severity-score`
+- `GET /v1/models`
+- `POST /v1/llm/generate`
+- `POST /v1/monitoring-providers/gcp/verify-connection`
+
+Project preference maintenance:
+
+- `POST /v1/project-preference/remove-repository`
+- `POST /v1/project-preference/bulk-remove-repositories`
+- `POST /v1/project-preference/remove-handoffs-for-integration`
 
 See `docs/endpoints.md` for request and response examples.
 
@@ -116,6 +181,8 @@ Core environment variables:
 | `VECTOR_STORE_DSN` | Required when `VECTOR_STORE=pgvector` |
 | `VECTOR_DIMENSIONS` | Embedding/vector width for pgvector storage |
 | `SIMILARITY_THRESHOLD` | Default nearest-neighbor threshold |
+| `LLM_MODEL` | Comma-separated model list, rotated round-robin per request |
+| `EMBEDDING_MODEL` | Comma-separated model list, rotated round-robin per request |
 
 ## LLM and embedding providers
 
@@ -136,12 +203,21 @@ Core environment variables:
 
 `stub` is useful for local compatibility testing because it requires no external credentials and keeps responses deterministic.
 
+`LLM_MODEL` and `EMBEDDING_MODEL` accept comma-separated lists. Every provider request picks the next model in the list, so a multi-model list spreads load across models instead of pinning one:
+
+```bash
+LLM_MODEL=gpt-4.1-mini,gpt-4.1-nano
+EMBEDDING_MODEL=text-embedding-3-small
+```
+
+The similarity response's `model_used` reports the first configured embedding model, not necessarily the model that served that request.
+
 Example OpenAI-compatible setup:
 
 ```bash
 LLM_PROVIDER=openai
 LLM_API_KEY=sk-...
-LLM_MODEL=gpt-4.1-mini
+LLM_MODEL=gpt-4.1-mini,gpt-4.1-nano
 
 EMBEDDING_PROVIDER=openai
 EMBEDDING_API_KEY=sk-...
@@ -205,7 +281,7 @@ VECTOR_STORE_DSN=postgres://seer:seer@postgres:5432/seer?sslmode=disable
 VECTOR_DIMENSIONS=1536
 ```
 
-Important: autofix run state and project preferences still live in SQLite even when `pgvector` is enabled.
+Important: autofix and explorer run state still live in SQLite even when `pgvector` is enabled.
 
 ## Sentry observability
 
@@ -225,19 +301,23 @@ When `SENTRY_DSN` is set, faux-seer enables:
 - logs via `sentry-go/slog`
 - request metrics via `sentry.NewMeter`
 
-Separately from Sentry observability, faux-seer now emits structured HTTP access logs to stdout for each request at `info` level and below. These log entries include:
+Separately from Sentry observability, faux-seer emits one structured HTTP access log line per request to stdout. Each record includes:
 
 - method
-- path
-- status
+- full request URL (path plus query string)
+- request headers
+- request body
+- response status
 - duration in milliseconds
-- remote address
+
+Startup, generic errors, and these access records are the only log lines the server emits.
 
 ## Known limitations
 
 Compared with real Seer:
 
-- autofix is compatibility-oriented and persists placeholder state rather than running Seer's full agent loop
+- autofix persists coding-agent state snapshots rather than running Seer's full agent loop
+- explorer indexing, repo, and agent feature-run endpoints are acknowledgement stubs
 - summaries and severity are heuristic or provider-assisted, not model-parity implementations
 - app state stays on SQLite even when `pgvector` is enabled
 - several Seer-only behaviors remain intentionally unimplemented

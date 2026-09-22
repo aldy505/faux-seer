@@ -9,13 +9,15 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/aldy505/faux-seer/internal/config"
 )
 
 type openAICompatClient struct {
 	httpClient  *http.Client
 	baseURL     string
 	apiKey      string
-	model       string
+	models      *config.ModelSelector
 	httpReferer string
 }
 
@@ -38,19 +40,20 @@ type chatCompletionResponse struct {
 }
 
 // NewOpenAICompatClient builds an OpenAI-compatible chat completion client.
-func NewOpenAICompatClient(baseURL, apiKey, model, httpReferer string) Client {
+// Model names are rotated round-robin across requests.
+func NewOpenAICompatClient(baseURL, apiKey string, models []string, httpReferer string) Client {
 	return &openAICompatClient{
 		httpClient:  &http.Client{},
 		baseURL:     strings.TrimRight(baseURL, "/"),
 		apiKey:      apiKey,
-		model:       model,
+		models:      config.NewModelSelector(models),
 		httpReferer: httpReferer,
 	}
 }
 
 func (c *openAICompatClient) Complete(ctx context.Context, req CompletionRequest) (string, error) {
 	payload, err := json.Marshal(chatCompletionRequest{
-		Model:       c.model,
+		Model:       c.models.Next(),
 		Messages:    []chatMessage{{Role: "system", Content: req.SystemPrompt}, {Role: "user", Content: req.UserPrompt}},
 		Temperature: req.Temperature,
 		MaxTokens:   req.MaxTokens,

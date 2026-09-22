@@ -22,13 +22,13 @@ type Config struct {
 	LLMProvider          string
 	LLMBaseURL           string
 	LLMAPIKey            string
-	LLMModel             string
+	LLMModel             []string
 	LLMMaxTokens         int
 	LLMTemperature       float64
 	EmbeddingProvider    string
 	EmbeddingBaseURL     string
 	EmbeddingAPIKey      string
-	EmbeddingModel       string
+	EmbeddingModel       []string
 	EmbeddingDimensions  int
 	VectorStore          string
 	VectorStoreDSN       string
@@ -47,11 +47,11 @@ func Load() (*Config, error) {
 		LLMProvider:       strings.ToLower(envDefault("LLM_PROVIDER", "stub")),
 		LLMBaseURL:        strings.TrimSpace(os.Getenv("LLM_BASE_URL")),
 		LLMAPIKey:         strings.TrimSpace(os.Getenv("LLM_API_KEY")),
-		LLMModel:          envDefault("LLM_MODEL", "gpt-4.1-mini"),
+		LLMModel:          splitList(envDefault("LLM_MODEL", "gpt-4.1-mini")),
 		EmbeddingProvider: strings.ToLower(envDefault("EMBEDDING_PROVIDER", "stub")),
 		EmbeddingBaseURL:  strings.TrimSpace(os.Getenv("EMBEDDING_BASE_URL")),
 		EmbeddingAPIKey:   strings.TrimSpace(os.Getenv("EMBEDDING_API_KEY")),
-		EmbeddingModel:    envDefault("EMBEDDING_MODEL", "text-embedding-3-small"),
+		EmbeddingModel:    splitList(envDefault("EMBEDDING_MODEL", "text-embedding-3-small")),
 		VectorStore:       strings.ToLower(envDefault("VECTOR_STORE", "sqlitevec")),
 		VectorStoreDSN:    strings.TrimSpace(os.Getenv("VECTOR_STORE_DSN")),
 		HTTPReferer:       strings.TrimSpace(os.Getenv("HTTP_REFERER")),
@@ -82,6 +82,12 @@ func Load() (*Config, error) {
 	}
 	if cfg.SentryTracesRate < 0 || cfg.SentryTracesRate > 1 {
 		errs = append(errs, "SENTRY_TRACES_SAMPLE_RATE must be between 0 and 1")
+	}
+	if len(cfg.LLMModel) == 0 {
+		errs = append(errs, "LLM_MODEL must list at least one model")
+	}
+	if len(cfg.EmbeddingModel) == 0 {
+		errs = append(errs, "EMBEDDING_MODEL must list at least one model")
 	}
 	if cfg.LLMProvider == "openrouter" || cfg.LLMProvider == "custom" || cfg.LLMProvider == "openai" {
 		if cfg.LLMProvider != "openai" && cfg.LLMBaseURL == "" {
@@ -143,6 +149,18 @@ func boolDefault(key string, fallback bool, errs *[]string) bool {
 		return fallback
 	}
 	return parsed
+}
+
+// splitList parses a comma-separated environment value into trimmed entries.
+func splitList(raw string) []string {
+	parts := strings.Split(raw, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			values = append(values, trimmed)
+		}
+	}
+	return values
 }
 
 func splitSecrets(raw string) []string {

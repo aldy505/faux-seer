@@ -12,13 +12,15 @@ import (
 	"math"
 	"net/http"
 	"strings"
+
+	"github.com/aldy505/faux-seer/internal/config"
 )
 
 type openAICompatClient struct {
 	httpClient  *http.Client
 	baseURL     string
 	apiKey      string
-	model       string
+	models      *config.ModelSelector
 	dimensions  int
 	httpReferer string
 }
@@ -37,15 +39,16 @@ type embeddingResponse struct {
 type stubClient struct{ dimensions int }
 
 // NewOpenAICompatClient creates an OpenAI-compatible embedding client.
-func NewOpenAICompatClient(baseURL, apiKey, model string, dimensions int, httpReferer string) Client {
-	return &openAICompatClient{httpClient: &http.Client{}, baseURL: strings.TrimRight(baseURL, "/"), apiKey: apiKey, model: model, dimensions: dimensions, httpReferer: httpReferer}
+// Model names are rotated round-robin across requests.
+func NewOpenAICompatClient(baseURL, apiKey string, models []string, dimensions int, httpReferer string) Client {
+	return &openAICompatClient{httpClient: &http.Client{}, baseURL: strings.TrimRight(baseURL, "/"), apiKey: apiKey, models: config.NewModelSelector(models), dimensions: dimensions, httpReferer: httpReferer}
 }
 
 // NewStubClient creates a deterministic local embedding client.
 func NewStubClient(dimensions int) Client { return &stubClient{dimensions: dimensions} }
 
 func (c *openAICompatClient) EmbedTexts(ctx context.Context, texts []string) ([][]float32, error) {
-	payload, err := json.Marshal(embeddingRequest{Model: c.model, Input: texts})
+	payload, err := json.Marshal(embeddingRequest{Model: c.models.Next(), Input: texts})
 	if err != nil {
 		return nil, fmt.Errorf("marshal embedding request: %w", err)
 	}

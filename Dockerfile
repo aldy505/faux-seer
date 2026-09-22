@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:1.26.1-trixie AS builder
+FROM golang:1.27.1-trixie AS builder
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential ca-certificates pkg-config libsqlite3-dev \

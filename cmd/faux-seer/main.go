@@ -4,7 +4,9 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -76,11 +78,11 @@ func main() {
 	similarityService := similarity.New(cfg, embeddingClient, vectorStore)
 	severityService := severity.New(llmClient)
 	issueSummaryService := issuesummary.New(llmClient)
-	server := handler.New(cfg, logger, store, autofixService, explorerService, similarityService, severityService, issueSummaryService)
+	server := handler.New(cfg, logger, autofixService, explorerService, similarityService, severityService, issueSummaryService)
 
 	httpServer := &http.Server{Addr: cfg.Addr, Handler: obs.WrapHTTP(server.Routes())}
 	go func() {
-		logger.InfoContext(ctx, "starting faux-seer", "addr", cfg.Addr)
+		logger.InfoContext(ctx, startupMessage(cfg.Addr))
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			logger.ErrorContext(ctx, "http server failed", "error", err)
 			obs.Flush(2 * time.Second)
@@ -96,4 +98,17 @@ func main() {
 		obs.Flush(2 * time.Second)
 		os.Exit(1)
 	}
+}
+
+// startupMessage renders the single startup log line for the configured bind
+// address, expanding an empty host to all interfaces.
+func startupMessage(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		host, port = "", addr
+	}
+	if host == "" {
+		host = "0.0.0.0"
+	}
+	return fmt.Sprintf("Server started on %s:%s", host, port)
 }

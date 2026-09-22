@@ -35,32 +35,11 @@ type SimilarRequest struct {
 }
 
 // SimilarResponse matches Seer's similarity response.
+// ModelUsed reports the primary configured embedding model, not necessarily the
+// model that served a given request, because embedding calls load-balance.
 type SimilarResponse struct {
 	Responses []vectorstore.SimilarIssue `json:"responses"`
 	ModelUsed string                     `json:"model_used,omitempty"`
-}
-
-// GroupingRecordData stores a single grouping record request item.
-type GroupingRecordData struct {
-	GroupID       int64   `json:"group_id"`
-	Hash          string  `json:"hash"`
-	ProjectID     int64   `json:"project_id"`
-	ExceptionType *string `json:"exception_type,omitempty"`
-}
-
-// GroupingRecordRequest matches Seer's bulk record endpoint.
-type GroupingRecordRequest struct {
-	Data                      []GroupingRecordData `json:"data"`
-	StacktraceList            []string             `json:"stacktrace_list"`
-	EncodeStacktraceBatchSize int                  `json:"encode_stacktrace_batch_size,omitempty"`
-	Threshold                 *float64             `json:"threshold,omitempty"`
-	K                         int                  `json:"k,omitempty"`
-}
-
-// BulkCreateResponse matches Seer's bulk record response.
-type BulkCreateResponse struct {
-	Success            bool                                `json:"success"`
-	GroupsWithNeighbor map[string]vectorstore.SimilarIssue `json:"groups_with_neighbor"`
 }
 
 // DeleteByHashRequest matches Seer's delete-by-hash request.
@@ -91,48 +70,26 @@ func (s *Service) Similar(ctx context.Context, raw json.RawMessage) (SimilarResp
 		if err := s.store.UpsertGroupingRecords(ctx, []vectorstore.GroupingRecord{record}); err != nil {
 			return SimilarResponse{}, err
 		}
-		return SimilarResponse{Responses: []vectorstore.SimilarIssue{}, ModelUsed: s.cfg.EmbeddingModel}, nil
+		return SimilarResponse{Responses: []vectorstore.SimilarIssue{}, ModelUsed: s.primaryEmbeddingModel()}, nil
 	}
 	results, err := s.store.SearchSimilar(ctx, request.ProjectID, request.Hash, vectors[0], request.K, threshold)
 	if err != nil {
 		return SimilarResponse{}, err
 	}
-	return SimilarResponse{Responses: results, ModelUsed: s.cfg.EmbeddingModel}, nil
+	// Sentry iterates this list directly, so it must serialize as [] rather
+	// than null when the store reports no matches.
+	if results == nil {
+		results = []vectorstore.SimilarIssue{}
+	}
+	return SimilarResponse{Responses: results, ModelUsed: s.primaryEmbeddingModel()}, nil
 }
 
-// CreateGroupingRecords stores grouping vectors and returns nearest-neighbor hints.
-func (s *Service) CreateGroupingRecords(ctx context.Context, raw json.RawMessage) (BulkCreateResponse, error) {
-	var request GroupingRecordRequest
-	if err := json.Unmarshal(raw, &request); err != nil {
-		return BulkCreateResponse{}, fmt.Errorf("decode grouping record request: %w", err)
+// primaryEmbeddingModel returns the first configured embedding model name.
+func (s *Service) primaryEmbeddingModel() string {
+	if len(s.cfg.EmbeddingModel) == 0 {
+		return ""
 	}
-	vectors, err := s.embeddings.EmbedTexts(ctx, request.StacktraceList)
-	if err != nil {
-		return BulkCreateResponse{}, err
-	}
-	records := make([]vectorstore.GroupingRecord, 0, len(request.Data))
-	neighbors := make(map[string]vectorstore.SimilarIssue, len(request.Data))
-	threshold := s.cfg.SimilarityThreshold
-	if request.Threshold != nil {
-		threshold = *request.Threshold
-	}
-	for idx, item := range request.Data {
-		if idx >= len(vectors) {
-			break
-		}
-		matches, err := s.store.SearchSimilar(ctx, item.ProjectID, item.Hash, vectors[idx], max(1, request.K), threshold)
-		if err != nil {
-			return BulkCreateResponse{}, err
-		}
-		if len(matches) > 0 {
-			neighbors[item.Hash] = matches[0]
-		}
-		records = append(records, vectorstore.GroupingRecord{ProjectID: item.ProjectID, Hash: item.Hash, ExceptionType: item.ExceptionType, Vector: vectors[idx]})
-	}
-	if err := s.store.UpsertGroupingRecords(ctx, records); err != nil {
-		return BulkCreateResponse{}, err
-	}
-	return BulkCreateResponse{Success: true, GroupsWithNeighbor: neighbors}, nil
+	return s.cfg.EmbeddingModel[0]
 }
 
 // DeleteProject deletes grouping records for a project.
@@ -157,23 +114,6 @@ func (s *Service) DeleteByHash(ctx context.Context, raw json.RawMessage) (map[st
 	return map[string]bool{"success": success}, nil
 }
 
-// UpsertSupergroup stores a supergroup artifact.
-func (s *Service) UpsertSupergroup(ctx context.Context, raw json.RawMessage) (map[string]any, error) {
-	var request struct {
-		OrganizationID int64          `json:"organization_id"`
-		GroupID        int64          `json:"group_id"`
-		ProjectID      int64          `json:"project_id"`
-		ArtifactData   map[string]any `json:"artifact_data"`
-	}
-	if err := json.Unmarshal(raw, &request); err != nil {
-		return nil, fmt.Errorf("decode supergroup embedding request: %w", err)
-	}
-	if err := s.store.InsertSupergroup(ctx, vectorstore.SupergroupRecord{OrganizationID: request.OrganizationID, GroupID: request.GroupID, ProjectID: request.ProjectID, Artifact: request.ArtifactData}); err != nil {
-		return nil, err
-	}
-	return map[string]any{"success": true}, nil
-}
-
 // ListSupergroups returns stored supergroup artifacts.
 func (s *Service) ListSupergroups(ctx context.Context, raw json.RawMessage) (map[string]any, error) {
 	var request struct {
@@ -196,12 +136,10 @@ func (s *Service) ListSupergroups(ctx context.Context, raw json.RawMessage) (map
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"data": items}, nil
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
+	// Sentry iterates this list directly, so an empty result must serialize as
+	// [] rather than null.
+	if items == nil {
+		items = []map[string]any{}
 	}
-	return b
+	return map[string]any{"data": items}, nil
 }

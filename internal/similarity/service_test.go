@@ -20,7 +20,7 @@ func TestSimilarityTrainingAndLookup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create sqlitevec store: %v", err)
 	}
-	service := New(&config.Config{SimilarityThreshold: 0.2, EmbeddingModel: "stub"}, embedding.NewStubClient(12), vectorStore)
+	service := New(&config.Config{SimilarityThreshold: 0.2, EmbeddingModel: []string{"stub"}}, embedding.NewStubClient(12), vectorStore)
 	seed := []byte(`{"project_id":1,"stacktrace":"panic at foo","hash":"hash-a","training_mode":true}`)
 	if _, err := service.Similar(context.Background(), seed); err != nil {
 		t.Fatalf("seed similarity record: %v", err)

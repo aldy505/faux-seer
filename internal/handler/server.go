@@ -15,7 +15,6 @@ import (
 	"github.com/aldy505/faux-seer/internal/auth"
 	"github.com/aldy505/faux-seer/internal/autofix"
 	"github.com/aldy505/faux-seer/internal/config"
-	"github.com/aldy505/faux-seer/internal/db"
 	"github.com/aldy505/faux-seer/internal/explorer"
 	issuesummary "github.com/aldy505/faux-seer/internal/issueSummary"
 	"github.com/aldy505/faux-seer/internal/severity"
@@ -26,7 +25,6 @@ import (
 type Server struct {
 	cfg          *config.Config
 	log          *slog.Logger
-	store        *db.Store
 	autofix      *autofix.Service
 	explorer     *explorer.Service
 	similarity   *similarity.Service
@@ -35,11 +33,10 @@ type Server struct {
 }
 
 // New creates a server instance.
-func New(cfg *config.Config, logger *slog.Logger, store *db.Store, autofixService *autofix.Service, explorerService *explorer.Service, similarityService *similarity.Service, severityService *severity.Service, issueSummaryService *issuesummary.Service) *Server {
+func New(cfg *config.Config, logger *slog.Logger, autofixService *autofix.Service, explorerService *explorer.Service, similarityService *similarity.Service, severityService *severity.Service, issueSummaryService *issuesummary.Service) *Server {
 	return &Server{
 		cfg:          cfg,
 		log:          logger,
-		store:        store,
 		autofix:      autofixService,
 		explorer:     explorerService,
 		similarity:   similarityService,
@@ -49,42 +46,99 @@ func New(cfg *config.Config, logger *slog.Logger, store *db.Store, autofixServic
 }
 
 // Routes constructs the application's ServeMux.
+//
+// The route table mirrors every path Sentry's signed Seer client can issue
+// (see src/sentry/seer/signed_seer_api.py and the sibling seer client modules
+// in the Sentry tree). Paths Sentry never sends are not served.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
 	mux.HandleFunc("GET /health/live", s.health)
 	mux.HandleFunc("GET /health/ready", s.health)
-	mux.HandleFunc("POST /v1/automation/autofix/start", s.withAuth(s.autofixStart))
-	mux.HandleFunc("POST /v1/automation/autofix/update", s.withAuth(s.autofixUpdate))
-	mux.HandleFunc("POST /v1/automation/autofix/state", s.withAuth(s.autofixState))
-	mux.HandleFunc("POST /v1/automation/autofix/state/pr", s.withAuth(s.autofixStatePR))
-	mux.HandleFunc("POST /v1/automation/autofix/prompt", s.withAuth(s.autofixPrompt))
-	mux.HandleFunc("POST /v1/automation/autofix/coding-agent/state/set", s.withAuth(s.codingAgentStateSet))
-	mux.HandleFunc("POST /v1/automation/autofix/coding-agent/state/update", s.withAuth(s.codingAgentStateUpdate))
+
+	// Agent and explorer runs.
+	mux.HandleFunc("POST /v1/automation/agent/feature/run", s.withAuth(s.agentFeatureRun))
 	mux.HandleFunc("POST /v1/automation/explorer/chat", s.withAuth(s.explorerChat))
 	mux.HandleFunc("POST /v1/automation/explorer/state", s.withAuth(s.explorerState))
-	mux.HandleFunc("POST /v1/automation/explorer/runs", s.withAuth(s.explorerRuns))
-	mux.HandleFunc("POST /v1/automation/explorer/update", s.withAuth(s.explorerUpdate))
 	mux.HandleFunc("POST /v1/automation/explorer/state/pr", s.withAuth(s.explorerStatePR))
-	mux.HandleFunc("POST /v1/automation/codebase/repo/check-access", s.withAuth(s.repoAccess))
+	mux.HandleFunc("POST /v1/automation/explorer/runs/by-ids", s.withAuth(s.explorerRunsByIDs))
+	mux.HandleFunc("POST /v1/automation/explorer/repos", s.withAuth(s.explorerRepos))
+	mux.HandleFunc("POST /v1/automation/explorer/update", s.withAuth(s.explorerUpdate))
+	mux.HandleFunc("POST /v1/automation/explorer/index", s.withAuth(s.explorerIndex))
+	mux.HandleFunc("POST /v1/automation/explorer/index/org-repo-knowledge", s.withAuth(s.explorerIndex))
+	mux.HandleFunc("POST /v1/automation/explorer/index/org-project-knowledge", s.withAuth(s.explorerIndex))
+	mux.HandleFunc("POST /v1/automation/explorer/index/sentry-knowledge", s.withAuth(s.explorerIndex))
+	mux.HandleFunc("POST /v1/automation/explorer/export-indexes", s.withAuth(s.explorerIndex))
+	mux.HandleFunc("POST /v1/explorer/service-map/update", s.withAuth(s.serviceMapUpdate))
+
+	// Autofix coding-agent state.
+	mux.HandleFunc("POST /v1/automation/autofix/coding-agent/state/set", s.withAuth(s.codingAgentStateSet))
+	mux.HandleFunc("POST /v1/automation/autofix/coding-agent/state/update", s.withAuth(s.codingAgentStateUpdate))
+
+	// Summaries: issues, traces, feedback, replays.
 	mux.HandleFunc("POST /v1/automation/summarize/issue", s.withAuth(s.summarizeIssue))
 	mux.HandleFunc("POST /v1/automation/summarize/trace", s.withAuth(s.summarizeTrace))
 	mux.HandleFunc("POST /v1/automation/summarize/fixability", s.withAuth(s.fixability))
-	mux.HandleFunc("POST /v1/project-preference", s.withAuth(s.getProjectPreference))
-	mux.HandleFunc("POST /v1/project-preference/set", s.withAuth(s.setProjectPreference))
-	mux.HandleFunc("POST /v1/project-preference/bulk", s.withAuth(s.bulkGetProjectPreferences))
-	mux.HandleFunc("POST /v1/project-preference/bulk-set", s.withAuth(s.bulkSetProjectPreferences))
-	mux.HandleFunc("POST /v1/project-preference/remove-repository", s.withAuth(s.removeRepository))
+	mux.HandleFunc("POST /v1/automation/summarize/feedback/spam-detection", s.withAuth(s.feedbackSpamDetection))
+	mux.HandleFunc("POST /v1/automation/summarize/feedback/labels", s.withAuth(s.feedbackLabels))
+	mux.HandleFunc("POST /v1/automation/summarize/feedback/title", s.withAuth(s.feedbackTitle))
+	mux.HandleFunc("POST /v1/automation/summarize/feedback/label-groups", s.withAuth(s.feedbackLabelGroups))
+	mux.HandleFunc("POST /v1/automation/summarize/feedback/summarize", s.withAuth(s.feedbackSummarize))
+	mux.HandleFunc("POST /v1/automation/summarize/replay/breadcrumbs/start", s.withAuth(s.replayBreadcrumbsStart))
+	mux.HandleFunc("POST /v1/automation/summarize/replay/breadcrumbs/state", s.withAuth(s.replayBreadcrumbsState))
+	mux.HandleFunc("POST /v1/automation/summarize/replay/breadcrumbs/delete", s.withAuth(s.replayBreadcrumbsDelete))
+
+	// Investigations.
+	mux.HandleFunc("POST /v1/automation/investigations", s.withAuth(s.investigationCreate))
+	mux.HandleFunc("POST /v1/automation/investigations/{run_id}/commands", s.withAuth(s.investigationCommand))
+	mux.HandleFunc("GET /v1/automation/investigations/{run_id}", s.withAuth(s.investigationGet))
+
+	// Issue detection.
+	mux.HandleFunc("POST /v1/automation/issue-detection/analyze", s.withAuth(s.issueDetectionAnalyze))
+	mux.HandleFunc("GET /v1/automation/issue-detection/check-budget/{org_id}", s.withAuth(s.issueDetectionCheckBudget))
+
+	// Codegen and assisted query.
+	mux.HandleFunc("POST /v1/automation/codegen/unit-tests", s.withAuth(s.unitTestsGenerate))
+	mux.HandleFunc("POST /v1/assisted-query/state", s.withAuth(s.assistedQueryState))
+	mux.HandleFunc("POST /v1/assisted-query/start", s.withAuth(s.assistedQueryStart))
+	mux.HandleFunc("POST /v1/assisted-query/translate", s.withAuth(s.assistedQueryTranslate))
+	mux.HandleFunc("POST /v1/assisted-query/translate-agentic", s.withAuth(s.assistedQueryTranslateAgentic))
+	mux.HandleFunc("POST /v1/assisted-query/create-cache", s.withAuth(s.assistedQueryCreateCache))
+
+	// Anomaly detection, breakpoints, workflows.
+	mux.HandleFunc("POST /v1/anomaly-detection/detect", s.withAuth(s.anomalyDetect))
+	mux.HandleFunc("POST /v1/anomaly-detection/alert-data", s.withAuth(s.anomalyAlertData))
+	mux.HandleFunc("POST /v1/anomaly-detection/store", s.withAuth(s.anomalyStore))
+	mux.HandleFunc("POST /v1/anomaly-detection/delete-alert-data", s.withAuth(s.anomalyDeleteAlertData))
+	mux.HandleFunc("POST /v1/workflows/compare/cohort", s.withAuth(s.workflowCompareCohort))
+	mux.HandleFunc("POST /trends/breakpoint-detector", s.withAuth(s.breakpointDetector))
+
+	// Code review, offboarding, PR metrics.
+	mux.HandleFunc("POST /v1/code_review/check/rerun", s.withAuth(s.codeReviewRerun))
+	mux.HandleFunc("POST /v1/code_review/review-request", s.withAuth(s.codeReviewRequest))
+	mux.HandleFunc("POST /v1/code_review/pr-closed", s.withAuth(s.codeReviewPRClosed))
+	mux.HandleFunc("POST /v1/offboarding/repository", s.withAuth(s.offboardRepository))
+	mux.HandleFunc("POST /v1/pr-metrics/delegated-agent-match", s.withAuth(s.prMetricsDelegatedAgentMatch))
+	mux.HandleFunc("POST /v1/pr-metrics/pr-close-judge", s.withAuth(s.prMetricsPRCloseJudge))
+
+	// Grouping, supergroups, severity, models, monitoring providers.
 	mux.HandleFunc("POST /v0/issues/similar-issues", s.withAuth(s.similarIssues))
-	mux.HandleFunc("POST /v0/issues/similar-issues/grouping-record", s.withAuth(s.groupingRecord))
 	mux.HandleFunc("GET /v0/issues/similar-issues/grouping-record/delete/{project_id}", s.withAuth(s.deleteGroupingProject))
 	mux.HandleFunc("POST /v0/issues/similar-issues/grouping-record/delete-by-hash", s.withAuth(s.deleteGroupingByHash))
-	mux.HandleFunc("POST /v0/issues/supergroups", s.withAuth(s.supergroupUpsert))
-	mux.HandleFunc("POST /v0/issues/supergroups/list", s.withAuth(s.supergroupList))
+	mux.HandleFunc("POST /v0/issues/supergroups/cluster-lightweight", s.withAuth(s.supergroupClusterLightweight))
 	mux.HandleFunc("POST /v0/issues/supergroups/get", s.withAuth(s.supergroupList))
 	mux.HandleFunc("POST /v0/issues/supergroups/get-by-group-ids", s.withAuth(s.supergroupList))
 	mux.HandleFunc("POST /v0/issues/severity-score", s.withAuth(s.severityScore))
-	mux.HandleFunc("POST /v1/issues/severity-score", s.withAuth(s.severityScore))
+	mux.HandleFunc("GET /v1/models", s.withAuth(s.seerModels))
+	mux.HandleFunc("POST /v1/llm/generate", s.withAuth(s.llmGenerate))
+	mux.HandleFunc("POST /v1/automation/oneshot/run", s.withAuth(s.oneshotRun))
+	mux.HandleFunc("POST /v1/monitoring-providers/gcp/verify-connection", s.withAuth(s.monitoringProviderVerifyConnection))
+
+	// Project preference maintenance.
+	mux.HandleFunc("POST /v1/project-preference/remove-repository", s.withAuth(s.projectPreferenceRemoveRepository))
+	mux.HandleFunc("POST /v1/project-preference/bulk-remove-repositories", s.withAuth(s.projectPreferenceBulkRemoveRepositories))
+	mux.HandleFunc("POST /v1/project-preference/remove-handoffs-for-integration", s.withAuth(s.projectPreferenceRemoveHandoffsForIntegration))
+
 	return mux
 }
 
@@ -108,12 +162,6 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (s *Server) repoAccess(w http.ResponseWriter, _ *http.Request, body []byte) {
-	var req map[string]any
-	_ = json.Unmarshal(body, &req)
-	s.writeJSON(w, http.StatusOK, map[string]bool{"has_access": true})
-}
-
 func (s *Server) writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -126,13 +174,14 @@ func (s *Server) writeError(w http.ResponseWriter, status int, message string) {
 	s.writeJSON(w, status, map[string]string{"error": message})
 }
 
-func readJSONMap(body []byte) map[string]any {
-	var out map[string]any
-	_ = json.Unmarshal(body, &out)
-	if out == nil {
-		return map[string]any{}
+// decodeOptionalJSONBody decodes a request body into out, tolerating an empty
+// body. Several Seer endpoints are GETs whose body is always empty; treating
+// that as malformed JSON would surface as a request failure to Sentry.
+func decodeOptionalJSONBody(body []byte, out any) error {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil
 	}
-	return out
+	return json.Unmarshal(body, out)
 }
 
 func asInt64(value any) int64 {

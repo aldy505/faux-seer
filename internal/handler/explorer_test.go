@@ -127,20 +127,16 @@ func TestExplorerChatContinueAndRuns(t *testing.T) {
 		"query":"Another run",
 		"user_org_context":{"user_id":8}
 	}`))
-	runsResp := issueRequest(server, http.MethodPost, "/v1/automation/explorer/runs", []byte(`{
-		"organization_id":1,
-		"user_id":7,
-		"category_key":"issue",
-		"category_value":"554844",
-		"offset":0,
-		"limit":10
+	runsResp := issueRequest(server, http.MethodPost, "/v1/automation/explorer/runs/by-ids", []byte(`{
+		"run_ids":[`+jsonNumber(started.RunID)+`,9999]
 	}`))
 	if runsResp.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", runsResp.Code, runsResp.Body.String())
 	}
 	var runs struct {
-		Data []struct {
+		Data map[string]struct {
 			RunID         int64  `json:"run_id"`
+			Status        string `json:"status"`
 			Title         string `json:"title"`
 			CategoryKey   string `json:"category_key"`
 			CategoryValue string `json:"category_value"`
@@ -151,16 +147,23 @@ func TestExplorerChatContinueAndRuns(t *testing.T) {
 		t.Fatalf("decode runs response: %v", err)
 	}
 	if len(runs.Data) != 1 {
-		t.Fatalf("expected 1 filtered run, got %d", len(runs.Data))
+		t.Fatalf("expected only known runs to be returned, got %#v", runs.Data)
 	}
-	if runs.Data[0].RunID != started.RunID {
-		t.Fatalf("expected run_id %d, got %d", started.RunID, runs.Data[0].RunID)
+	run, ok := runs.Data[jsonNumber(started.RunID)]
+	if !ok {
+		t.Fatalf("expected run %d in response, got %#v", started.RunID, runs.Data)
 	}
-	if runs.Data[0].UserID != 7 {
-		t.Fatalf("expected user_id 7, got %d", runs.Data[0].UserID)
+	if run.RunID != started.RunID {
+		t.Fatalf("expected run_id %d, got %d", started.RunID, run.RunID)
 	}
-	if runs.Data[0].CategoryKey != "issue" || runs.Data[0].CategoryValue != "554844" {
-		t.Fatalf("expected category filter fields, got %#v", runs.Data[0])
+	if run.Status != "completed" {
+		t.Fatalf("expected completed status, got %q", run.Status)
+	}
+	if run.UserID != 7 {
+		t.Fatalf("expected user_id 7, got %d", run.UserID)
+	}
+	if run.CategoryKey != "issue" || run.CategoryValue != "554844" {
+		t.Fatalf("expected category fields, got %#v", run)
 	}
 }
 

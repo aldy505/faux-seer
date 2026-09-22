@@ -3,9 +3,11 @@ package handler
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/aldy505/faux-seer/internal/auth"
@@ -32,7 +34,8 @@ func newTestServerWithMocks(t *testing.T) (*Server, *db.Store, *testutil.MockLLM
 	t.Helper()
 	cfg := &config.Config{
 		SharedSecrets:       []string{"test-secret"},
-		EmbeddingModel:      "stub",
+		LLMModel:            []string{"test-model"},
+		EmbeddingModel:      []string{"stub"},
 		EmbeddingDimensions: 8,
 		SimilarityThreshold: 0.1,
 	}
@@ -51,7 +54,6 @@ func newTestServerWithMocks(t *testing.T) (*Server, *db.Store, *testutil.MockLLM
 	server := New(
 		cfg,
 		logger,
-		store,
 		autofix.New(store, llmClient),
 		explorer.New(store, llmClient),
 		similarity.New(cfg, embClient, vectorStore),
@@ -63,7 +65,7 @@ func newTestServerWithMocks(t *testing.T) (*Server, *db.Store, *testutil.MockLLM
 
 func newSQLiteVectorServer(t *testing.T) *Server {
 	t.Helper()
-	cfg := &config.Config{SharedSecrets: []string{"test-secret"}, EmbeddingModel: "stub", SimilarityThreshold: 0.1, VectorDimensions: 8}
+	cfg := &config.Config{SharedSecrets: []string{"test-secret"}, EmbeddingModel: []string{"stub"}, SimilarityThreshold: 0.1, VectorDimensions: 8}
 	store, err := db.New(context.Background(), ":memory:")
 	if err != nil {
 		t.Fatalf("open sqlite store: %v", err)
@@ -76,7 +78,7 @@ func newSQLiteVectorServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatalf("create sqlitevec store: %v", err)
 	}
-	return New(cfg, logger, store, autofix.New(store, llmClient), explorer.New(store, llmClient), similarity.New(cfg, embClient, vectorStore), severity.New(llmClient), issuesummary.New(llmClient))
+	return New(cfg, logger, autofix.New(store, llmClient), explorer.New(store, llmClient), similarity.New(cfg, embClient, vectorStore), severity.New(llmClient), issuesummary.New(llmClient))
 }
 
 func issueRequest(server *Server, method, target string, payload []byte) *httptest.ResponseRecorder {
@@ -85,4 +87,14 @@ func issueRequest(server *Server, method, target string, payload []byte) *httpte
 	resp := httptest.NewRecorder()
 	server.Routes().ServeHTTP(resp, req)
 	return resp
+}
+
+func jsonNumber(value int64) string { return strings.TrimSpace(string(mustJSON(value))) }
+
+func mustJSON(value any) []byte {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		panic(err)
+	}
+	return payload
 }
