@@ -8,6 +8,8 @@ Authorization: Rpcsignature rpc0:<hex-hmac-sha256-of-raw-body>
 
 If `SEER_SHARED_SECRET` is unset, faux-seer skips signature verification for local development.
 
+The secret may be a comma- or semicolon-separated list, and `SEER_RPC_SHARED_SECRET`, `SEER_API_SHARED_SECRET`, and `SHARED_SECRET` are accepted as fallbacks for `SEER_SHARED_SECRET`. See `README.md` for the Sentry-side settings, feature flags, and organization toggle a full integration needs.
+
 ## Signing requests
 
 For local testing, you can compute the header from the exact raw JSON payload:

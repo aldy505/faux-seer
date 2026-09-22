@@ -23,45 +23,129 @@ The service listens on `:9091` by default.
 
 ## Pointing Sentry at faux-seer
 
-Point Sentry's Seer URLs at your faux-seer instance:
+### Seer URLs
 
-- `SEER_DEFAULT_URL`
-- `SEER_AUTOFIX_URL`
-- `SEER_SUMMARIZATION_URL`
-- `SEER_GROUPING_URL`
+Sentry builds one HTTP connection pool per Seer subsystem, and each pool reads
+its own setting from `src/sentry/conf/server.py`. `SEER_DEFAULT_URL` only seeds
+those settings at import time; nothing reads it at runtime.
 
-If you are running `faux-seer` directly on your host machine on the default port, set all four to the same base URL:
+| Sentry setting | Surface it reaches |
+| --- | --- |
+| `SEER_AUTOFIX_URL` | explorer chat/state/runs/repos/index, agent feature runs, autofix coding-agent state, codegen unit tests, oneshot, assisted query, investigations, issue detection, supergroups, project preferences, service-map updates, `GET /v1/models`, `POST /v1/llm/generate`, GCP verify-connection |
+| `SEER_SUMMARIZATION_URL` | issue/trace summaries, fixability, feedback summaries, replay breadcrumbs, severity score |
+| `SEER_GROUPING_URL` | `/v0/issues/similar-issues` and grouping-record deletion |
+| `SEER_ANOMALY_DETECTION_URL` | anomaly detection endpoints and `/v1/workflows/compare/cohort` |
+| `SEER_BREAKPOINT_DETECTION_URL` | `/trends/breakpoint-detector` |
+| `SEER_PREVENT_AI_URL` | code review and PR-metrics endpoints |
 
-```bash
-SEER_DEFAULT_URL=http://127.0.0.1:9091
-SEER_AUTOFIX_URL=http://127.0.0.1:9091
-SEER_SUMMARIZATION_URL=http://127.0.0.1:9091
-SEER_GROUPING_URL=http://127.0.0.1:9091
+Sentry defines `SEER_DEFAULT_URL = "http://127.0.0.1:9091"` and then derives the
+rest from it (`SEER_AUTOFIX_URL = SEER_DEFAULT_URL`, `SEER_SUMMARIZATION_URL =
+SEER_DEFAULT_URL`, and so on). That derivation happens when `server.py` is
+imported, so reassigning `SEER_DEFAULT_URL` in your own settings module does
+**not** rebind the derived names: `sentry.conf.py` begins with
+`from sentry.conf.server import *`, which copies the already-computed values.
+Assign every setting you need:
+
+```python
+# sentry.conf.py
+SEER_DEFAULT_URL = "http://faux-seer:9091"
+SEER_AUTOFIX_URL = SEER_DEFAULT_URL
+SEER_SUMMARIZATION_URL = SEER_DEFAULT_URL
+SEER_GROUPING_URL = SEER_DEFAULT_URL
+SEER_ANOMALY_DETECTION_URL = SEER_DEFAULT_URL
+SEER_BREAKPOINT_DETECTION_URL = SEER_DEFAULT_URL
+SEER_PREVENT_AI_URL = SEER_DEFAULT_URL
 ```
 
-If your Sentry containers need to reach a `faux-seer` container over a Docker network, use the service hostname instead. For example, if the service name is `faux-seer` and it listens on port `9091`:
+`SEER_SCORING_URL` also exists in `server.py`, but nothing in Sentry reads it.
+There is no environment-variable plumbing for these either — they are plain
+settings, so set them in the settings module.
 
-```bash
-SEER_DEFAULT_URL=http://faux-seer:9091
-SEER_AUTOFIX_URL=http://faux-seer:9091
-SEER_SUMMARIZATION_URL=http://faux-seer:9091
-SEER_GROUPING_URL=http://faux-seer:9091
-```
+Using one base URL for all of them is correct because `faux-seer` serves all of
+those compatibility endpoints from a single HTTP server. Sentry's development
+default is already `http://127.0.0.1:9091`, which is also `faux-seer`'s default
+port, so a host-run `faux-seer` needs no URL changes at all — only the shared
+secret.
 
-In the current implementation, using the same base URL for all four settings is correct because `faux-seer` serves all of those compatibility endpoints from one HTTP server.
+### Shared secret
 
-The shared secret must match on both sides:
-
-- Sentry side: `SEER_RPC_SHARED_SECRET` or `SEER_API_SHARED_SECRET`, depending on your local Sentry setup
-- faux-seer side: `SEER_SHARED_SECRET`
-
-Sentry signs requests with:
+Requests from Sentry to Seer are signed with **one** setting,
+`SEER_API_SHARED_SECRET` (a string), and faux-seer must be configured with the
+same value. Sentry sends:
 
 ```text
 Authorization: Rpcsignature rpc0:<hex>
 ```
 
-The signature is HMAC-SHA256 over the raw request body.
+The signature is HMAC-SHA256 over the raw request body
+(`src/sentry/seer/signed_seer_api.py`). Sentry also attaches an
+`X-Viewer-Context` JWT signed with the same secret; faux-seer verifies the HMAC
+header and ignores the JWT.
+
+faux-seer reads its copy from `SEER_SHARED_SECRET`, falling back in order to
+`SEER_RPC_SHARED_SECRET`, `SEER_API_SHARED_SECRET`, then `SHARED_SECRET`, so
+reusing the Sentry variable name in faux-seer's `.env` also works. The value may
+be a comma- or semicolon-separated list, matching Sentry's own list-of-secrets
+style, and a request is accepted if any secret in the list verifies.
+
+If `SEER_API_SHARED_SECRET` is empty, Sentry sends **no** `Authorization` header
+at all and logs `seer.unsigned_request`. A faux-seer with a shared secret
+configured then answers 401 to every call, so configure the pair together — or
+leave the secret unset on both sides to skip verification in local development.
+
+`SEER_RPC_SHARED_SECRET` in *Sentry* is the opposite direction: it is a list of
+secrets Sentry uses to validate `Rpcsignature`-signed requests that Seer sends
+*back* to Sentry (cross-region RPC). It does not authenticate requests to
+faux-seer, so setting it on the Sentry side does not affect this integration.
+
+### Feature flags and organization settings
+
+URLs alone are not enough: Sentry decides whether to call Seer with feature
+flags. Every Seer surface first checks
+
+```python
+has_seer_access(organization, actor)  # src/sentry/seer/seer_setup.py
+```
+
+which requires the `organizations:gen-ai-features` flag to be on **and** the
+organization's "Enable generative AI features" toggle
+(`sentry:hide_ai_features`, exposed in organization settings) to be off.
+Individual surfaces add their own gate:
+
+| Surface | Additional requirement |
+| --- | --- |
+| explorer chat and agent runs | `organizations:seer-explorer`, plus open team membership on the organization |
+| periodic explorer indexing | `organizations:seer-explorer-index` (or a Seer plan: `organizations:seat-based-seer-enabled` / `organizations:seer-added`) together with `organizations:gen-ai-features`, and no AI-feature opt-out |
+| autofix autotrigger | `has_seer_access` only |
+| code review | `organizations:code-review-beta` or `organizations:seat-based-seer-enabled`, plus per-repository code review enablement |
+| investigations | `organizations:investigations` plus open team membership |
+| issue detection | `organizations:ai-issue-detection` |
+| feedback summaries | `has_seer_access` only |
+| replay breadcrumbs | `organizations:session-replay` |
+| similarity grouping | project option `sentry:similarity_backfill_completed` (rate limits and killswitches can still suppress calls) |
+| severity score | project flag `projects:first-event-severity-calculation` |
+| assisted query | non-empty `SEER_AUTOFIX_URL` on top of `has_seer_access` |
+| anomaly detection, breakpoints, supergroups, offboarding, project preferences | no Seer-specific flag; they run when their owning endpoint or task runs |
+
+Flag definitions and defaults live in `src/sentry/features/temporary.py` and
+`src/sentry/features/permanent.py`. Most Seer flags use
+`FeatureHandlerStrategy.FLAGPOLE`, and `FeatureManager.has` falls back to
+`settings.SENTRY_FEATURES` when no handler resolves a flag, so a self-hosted
+install can turn them on from its settings module:
+
+```python
+# sentry.conf.py
+SENTRY_FEATURES = {
+    "organizations:gen-ai-features": True,
+    "organizations:seer-explorer": True,
+    "organizations:seer-explorer-index": True,
+}
+```
+
+Flags backed by plan or seat data (`organizations:seer-added`,
+`organizations:seat-based-seer-enabled`) resolve through their own handlers
+instead of that fallback. In the UI, granting features per organization is the
+usual route, and the AI toggle above is part of organization settings.
 
 ## Implemented compatibility surface
 
