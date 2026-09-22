@@ -12,36 +12,103 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/aldy505/faux-seer/internal/assistedquery"
 	"github.com/aldy505/faux-seer/internal/auth"
 	"github.com/aldy505/faux-seer/internal/autofix"
+	"github.com/aldy505/faux-seer/internal/codeindex"
 	"github.com/aldy505/faux-seer/internal/config"
+	"github.com/aldy505/faux-seer/internal/db"
 	"github.com/aldy505/faux-seer/internal/explorer"
+	"github.com/aldy505/faux-seer/internal/feedback"
+	"github.com/aldy505/faux-seer/internal/generation"
+	"github.com/aldy505/faux-seer/internal/git"
+	"github.com/aldy505/faux-seer/internal/investigations"
 	issuesummary "github.com/aldy505/faux-seer/internal/issueSummary"
+	"github.com/aldy505/faux-seer/internal/llm"
+	"github.com/aldy505/faux-seer/internal/monitoring"
+	"github.com/aldy505/faux-seer/internal/preferences"
+	"github.com/aldy505/faux-seer/internal/replay"
+	"github.com/aldy505/faux-seer/internal/runmgr"
+	"github.com/aldy505/faux-seer/internal/runs"
 	"github.com/aldy505/faux-seer/internal/severity"
 	"github.com/aldy505/faux-seer/internal/similarity"
 )
 
+// Services carries every dependency the HTTP layer delegates to.
+type Services struct {
+	Config         *config.Config
+	Logger         *slog.Logger
+	Store          *db.Store
+	LLM            llm.Client
+	Git            git.Provider
+	CodeIndex      *codeindex.Service
+	Runs           *runmgr.Manager
+	Autofix        *autofix.Service
+	Explorer       *explorer.Service
+	Similarity     *similarity.Service
+	Severity       *severity.Service
+	IssueSummary   *issuesummary.Service
+	Feedback       *feedback.Service
+	Replay         *replay.Service
+	Generation     *generation.Service
+	RunStore       *runs.Service
+	Investigations *investigations.Service
+	AssistedQuery  *assistedquery.Service
+	Preferences    *preferences.Service
+	Monitoring     *monitoring.Service
+}
+
 // Server wires the HTTP layer to application services.
 type Server struct {
-	cfg          *config.Config
-	log          *slog.Logger
-	autofix      *autofix.Service
-	explorer     *explorer.Service
-	similarity   *similarity.Service
-	severity     *severity.Service
-	issueSummary *issuesummary.Service
+	cfg            *config.Config
+	log            *slog.Logger
+	store          *db.Store
+	llm            llm.Client
+	git            git.Provider
+	codeIndex      *codeindex.Service
+	runs           *runmgr.Manager
+	autofix        *autofix.Service
+	explorer       *explorer.Service
+	similarity     *similarity.Service
+	severity       *severity.Service
+	issueSummary   *issuesummary.Service
+	feedback       *feedback.Service
+	replay         *replay.Service
+	generation     *generation.Service
+	runStore       *runs.Service
+	investigations *investigations.Service
+	assistedQuery  *assistedquery.Service
+	preferences    *preferences.Service
+	monitoring     *monitoring.Service
 }
 
 // New creates a server instance.
-func New(cfg *config.Config, logger *slog.Logger, autofixService *autofix.Service, explorerService *explorer.Service, similarityService *similarity.Service, severityService *severity.Service, issueSummaryService *issuesummary.Service) *Server {
+func New(services Services) *Server {
+	logger := services.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Server{
-		cfg:          cfg,
-		log:          logger,
-		autofix:      autofixService,
-		explorer:     explorerService,
-		similarity:   similarityService,
-		severity:     severityService,
-		issueSummary: issueSummaryService,
+		cfg:            services.Config,
+		log:            logger,
+		store:          services.Store,
+		llm:            services.LLM,
+		git:            services.Git,
+		codeIndex:      services.CodeIndex,
+		runs:           services.Runs,
+		autofix:        services.Autofix,
+		explorer:       services.Explorer,
+		similarity:     services.Similarity,
+		severity:       services.Severity,
+		issueSummary:   services.IssueSummary,
+		feedback:       services.Feedback,
+		replay:         services.Replay,
+		generation:     services.Generation,
+		runStore:       services.RunStore,
+		investigations: services.Investigations,
+		assistedQuery:  services.AssistedQuery,
+		preferences:    services.Preferences,
+		monitoring:     services.Monitoring,
 	}
 }
 
@@ -64,11 +131,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v1/automation/explorer/runs/by-ids", s.withAuth(s.explorerRunsByIDs))
 	mux.HandleFunc("POST /v1/automation/explorer/repos", s.withAuth(s.explorerRepos))
 	mux.HandleFunc("POST /v1/automation/explorer/update", s.withAuth(s.explorerUpdate))
-	mux.HandleFunc("POST /v1/automation/explorer/index", s.withAuth(s.explorerIndex))
-	mux.HandleFunc("POST /v1/automation/explorer/index/org-repo-knowledge", s.withAuth(s.explorerIndex))
-	mux.HandleFunc("POST /v1/automation/explorer/index/org-project-knowledge", s.withAuth(s.explorerIndex))
-	mux.HandleFunc("POST /v1/automation/explorer/index/sentry-knowledge", s.withAuth(s.explorerIndex))
-	mux.HandleFunc("POST /v1/automation/explorer/export-indexes", s.withAuth(s.explorerIndex))
+	mux.HandleFunc("POST /v1/automation/explorer/index", s.withAuth(s.explorerIndexGeneric))
+	mux.HandleFunc("POST /v1/automation/explorer/index/org-repo-knowledge", s.withAuth(s.explorerIndexOrgRepo))
+	mux.HandleFunc("POST /v1/automation/explorer/index/org-project-knowledge", s.withAuth(s.explorerIndexProject))
+	mux.HandleFunc("POST /v1/automation/explorer/index/sentry-knowledge", s.withAuth(s.explorerIndexSentryKnowledge))
+	mux.HandleFunc("POST /v1/automation/explorer/export-indexes", s.withAuth(s.explorerExportIndexes))
 	mux.HandleFunc("POST /v1/explorer/service-map/update", s.withAuth(s.serviceMapUpdate))
 
 	// Autofix coding-agent state.

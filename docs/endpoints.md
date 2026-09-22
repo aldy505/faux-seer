@@ -61,12 +61,12 @@ Response:
 
 ### `POST /v1/automation/agent/feature/run`
 
-Acknowledgement stub. faux-seer runs no agent features; Sentry's outbox only requires a non-null `run_id` in the response.
+Real. Creates a persisted run via the run manager and calls the LLM for a short result. Retried requests with the same `ExternalIdempotencyKey` reuse the existing run.
 
 Request example:
 
 ```json
-{"feature_id": "explorer", "payload": {"query": "hello"}}
+{"feature_id": "explorer", "payload": {"query": "hello"}, "external_idempotency_key": "exp-123"}
 ```
 
 Response:
@@ -77,7 +77,7 @@ Response:
 
 ### `POST /v1/automation/explorer/chat`
 
-Real. Persists a run and calls the configured LLM.
+Real. Creates an `ExplorerRunRecord` with `status: "processing"`, persists it, and dispatches a background `chatTask` via the run manager. The task calls the LLM, optionally augmenting the prompt with code-index chunks when the query looks code-related, and appends user and assistant blocks. The HTTP response returns immediately. Sentry polls `/explorer/state` for the completed result.
 
 Request example:
 
@@ -101,7 +101,7 @@ Response:
 
 ### `POST /v1/automation/explorer/state`
 
-Real. Returns the stored run state. Sentry builds a pydantic `SeerRunState` requiring `run_id`, `blocks[]`, `status`, and `updated_at`.
+Real. Returns the stored run state. Sentry builds a pydantic `SeerRunState` requiring `run_id`, `blocks[]`, `status`, and `updated_at`. The `status` field is a lowercase enum: `"processing"`, `"completed"`, `"error"`, or `"not_started"`. When a run fails (e.g. on process shutdown), the state includes a top-level `failure_reason` field set to `"shutdown"`.
 
 Request example:
 
@@ -109,7 +109,7 @@ Request example:
 {"organization_id": 1, "run_id": 1}
 ```
 
-Response:
+Response (completed):
 
 ```json
 {
@@ -137,6 +137,22 @@ Response:
     ],
     "status": "completed",
     "updated_at": "2026-05-12T05:39:26Z",
+    "owner_user_id": 1,
+    "repo_pr_states": {}
+  }
+}
+```
+
+Response (error with failure_reason):
+
+```json
+{
+  "session": {
+    "run_id": 1,
+    "blocks": [],
+    "status": "error",
+    "updated_at": "2026-05-12T05:39:26Z",
+    "failure_reason": "shutdown",
     "owner_user_id": 1,
     "repo_pr_states": {}
   }
@@ -188,7 +204,7 @@ Response:
 
 ### `POST /v1/automation/explorer/repos`
 
-Stub. faux-seer stores no repository selection.
+Real when a repository provider is configured. Returns the organization's stored repository preferences, or the configured provider's repositories via `Provider.ListRepos`. Without a configured provider, the empty list is the simulated answer.
 
 Request example:
 
@@ -199,7 +215,20 @@ Request example:
 Response:
 
 ```json
-{"repos":[]}
+{
+  "repos": [
+    {
+      "id": "12345",
+      "name": "acme/app",
+      "provider": "github",
+      "owner": "acme",
+      "external_id": "12345",
+      "default_branch": "main",
+      "read_access": true,
+      "write_access": true
+    }
+  ]
+}
 ```
 
 ### `POST /v1/automation/explorer/update`
@@ -220,7 +249,7 @@ Response:
 
 ### `POST /v1/automation/explorer/index`
 
-Ack stub. faux-seer keeps no search index; any JSON body is accepted and success is reported immediately.
+SIMULATED. The request carries only org and project ids, so faux-seer has no repository identity to fetch. Sentry sends repository details to `/explorer/index/org-repo-knowledge`, which does index them.
 
 Request example:
 
@@ -236,12 +265,17 @@ Response:
 
 ### `POST /v1/automation/explorer/index/org-repo-knowledge`
 
-Ack stub.
+Real when a repository provider and embedding client are configured. Fetches, chunks, embeds, and stores repository code via `codeindex.IndexRepo` in the background. Skips repositories the org has removed via project preferences. Returns `{"success": true}` immediately; indexing runs asynchronously.
 
 Request example:
 
 ```json
-{"org_id": 1}
+{
+  "org_id": 1,
+  "repositories": [
+    {"provider": "github", "owner": "acme", "name": "app", "default_branch": "main"}
+  ]
+}
 ```
 
 Response:
@@ -252,7 +286,7 @@ Response:
 
 ### `POST /v1/automation/explorer/index/org-project-knowledge`
 
-Ack stub.
+SIMULATED. The request carries only org and project ids without repository identity; real project-knowledge indexing requires Seer-internal project metadata not available to faux-seer.
 
 Request example:
 
@@ -268,7 +302,7 @@ Response:
 
 ### `POST /v1/automation/explorer/index/sentry-knowledge`
 
-Ack stub.
+SIMULATED. Sentry's documentation corpus is not reachable from faux-seer.
 
 Request example:
 
@@ -284,7 +318,7 @@ Response:
 
 ### `POST /v1/automation/explorer/export-indexes`
 
-Ack stub.
+SIMULATED. The export format and its destination are internal to Seer.
 
 Request example:
 
@@ -300,7 +334,7 @@ Response:
 
 ### `POST /v1/explorer/service-map/update`
 
-Status-only consumer.
+SIMULATED. faux-seer stores no service map, so the snapshot is discarded; Sentry checks only the HTTP status.
 
 Request example:
 
@@ -320,7 +354,7 @@ Response:
 
 ### `POST /v1/automation/autofix/coding-agent/state/set`
 
-Real. Persists coding-agent state onto an existing run.
+Real. Persists coding-agent state onto a run. When the run does not yet exist, the service creates it on demand with the caller-supplied id (because Sentry reports state for runs Seer already created). A background agent-advancement task is started that calls the LLM once to advance the agent.
 
 Request example:
 
@@ -343,11 +377,11 @@ Response:
 {"run_id":1,"status":"success"}
 ```
 
-Unknown `run_id` returns `{"run_id":1,"status":"error","message":"run not found"}` with status `200`.
+Unknown `run_id` is lazily created. On process shutdown, in-flight advancement tasks persist `status: "error"` with `failure_reason: "shutdown"`.
 
 ### `POST /v1/automation/autofix/coding-agent/state/update`
 
-Real. Merges an update into one agent entry.
+Real. Merges an update into one agent entry, locating the owning run by scanning all persisted runs for the agent id.
 
 Request example:
 
@@ -371,23 +405,27 @@ Unknown `agent_id` returns `{"run_id":0,"status":"error","message":"agent not fo
 
 ### `POST /v1/automation/codegen/unit-tests`
 
-Status-only consumer.
+Real when a repository provider is configured. Fetches the PR diff for the changed file and asks the LLM to generate unit tests. Without a configured provider, returns a simulated success.
 
 Request example:
 
 ```json
-{"any_key": "any_value"}
+{
+  "repo": {"provider": "github", "owner": "acme", "name": "app"},
+  "pr_id": 123,
+  "file_path": "src/foo.py"
+}
 ```
 
 Response:
 
 ```json
-{"success":true}
+{"success":true,"tests":"import pytest\n..."}
 ```
 
 ### `POST /v1/automation/oneshot/run`
 
-Stub. Callers extract keys from `result`.
+Real. Calls the LLM and returns `{"result": {...}}`. The result keys vary by `oneshot_id`: `"conversation_title"` returns `{"title": ...}`, `"agent_question"` returns `{"answer": ...}`. Unknown ids default to `{"answer": ...}`.
 
 Request example:
 
@@ -398,7 +436,7 @@ Request example:
 Response:
 
 ```json
-{"result":{}}
+{"result":{"answer":"..."}}
 ```
 
 ---
@@ -430,7 +468,7 @@ Response:
 
 ### `POST /v1/automation/summarize/trace`
 
-Heuristic.
+Real. Calls the LLM with trace context from the request and populates all fields of `SummarizeTraceResponse`. Falls back to a deterministic heuristic when the LLM fails.
 
 Request example:
 
@@ -452,7 +490,7 @@ Response:
 
 ### `POST /v1/automation/summarize/fixability`
 
-Heuristic.
+Real. Calls the LLM and returns a fixability assessment with the same shape as issue summaries.
 
 Request example:
 
@@ -475,7 +513,7 @@ Response:
 
 ### `POST /v1/automation/summarize/feedback/spam-detection`
 
-Stub. `is_spam` must be a JSON bool.
+Real. Calls the LLM with a boolean classification prompt. Returns HTTP 400 for malformed requests or LLM failures.
 
 Request example:
 
@@ -491,7 +529,7 @@ Response:
 
 ### `POST /v1/automation/summarize/feedback/labels`
 
-Stub. Nested object required.
+Real. Calls the LLM to produce a JSON array of category labels. Returns HTTP 400 for malformed requests or LLM failures.
 
 Request example:
 
@@ -502,12 +540,12 @@ Request example:
 Response:
 
 ```json
-{"data":{"labels":[]}}
+{"data":{"labels":["bug","ui"]}}
 ```
 
 ### `POST /v1/automation/summarize/feedback/title`
 
-Derived from the message.
+Real. Calls the LLM to produce a title. Falls back to the deterministic `DeriveFeedbackTitle` heuristic when the LLM returns empty.
 
 Request example:
 
@@ -523,7 +561,7 @@ Response:
 
 ### `POST /v1/automation/summarize/feedback/label-groups`
 
-One entry per requested label.
+Real. Calls the LLM to group labels with associated labels. Returns one entry per requested label.
 
 Request example:
 
@@ -534,12 +572,12 @@ Request example:
 Response:
 
 ```json
-{"data":[{"primaryLabel":"bug","associatedLabels":[]},{"primaryLabel":"feature","associatedLabels":[]}]}
+{"data":[{"primaryLabel":"bug","associatedLabels":["regression"]},{"primaryLabel":"feature","associatedLabels":["enhancement"]}]}
 ```
 
 ### `POST /v1/automation/summarize/feedback/summarize`
 
-Deterministic.
+Real. Calls the LLM to summarize a list of feedback messages. Returns HTTP 400 for malformed requests or LLM failures.
 
 Request example:
 
@@ -550,12 +588,12 @@ Request example:
 Response:
 
 ```json
-{"data":"Compatibility summary of 2 user feedback items."}
+{"data":"Users report crashes on startup and slow page loading."}
 ```
 
 ### `POST /v1/automation/summarize/replay/breadcrumbs/start`
 
-Frontend-facing shape.
+Real. Validates the request, upserts a `replay_breadcrumb_summaries` row with `status: "processing"`, calls the LLM with a synthesized breadcrumb narrative (the request carries `replay_id` and `num_segments` but no raw segments), stores the summary, and returns it with `status: "completed"`.
 
 Request example:
 
@@ -571,7 +609,7 @@ Response:
 
 ### `POST /v1/automation/summarize/replay/breadcrumbs/state`
 
-Polled by the frontend. Status is a lowercase enum: `processing`, `completed`, `error`, `not_started`. Returns the same shape as `start`.
+Real. Reads the stored replay breadcrumb summary from SQLite. When no summary exists for the given `replay_id`, returns `status: "not_started"`.
 
 Request example:
 
@@ -587,7 +625,7 @@ Response:
 
 ### `POST /v1/automation/summarize/replay/breadcrumbs/delete`
 
-Status-only consumer.
+Real. Removes stored replay breadcrumb summaries from SQLite and returns `{"success": true}`.
 
 Request example:
 
@@ -607,7 +645,7 @@ Response:
 
 ### `POST /v1/automation/investigations`
 
-Stub. Sentry validates `runId >= 1`, `created` bool, and `projection` dict.
+Real. Creates a persisted run via `runs.Service.Start` with an idempotency key derived from `requestId`. The background task calls the LLM with an investigation prompt and merges the answer into the run projection. Sentry validates `runId >= 1`, `created` bool, and `projection` dict.
 
 Request example:
 
@@ -623,7 +661,7 @@ Response:
 
 ### `POST /v1/automation/investigations/{run_id}/commands`
 
-Stub. `accepted` must be exactly `true`. `requestId` is echoed when it parses as UUID, else a fresh v4 is generated.
+Real. Validates `requestId` and `expectedWorkflowVersion`, records the command via `AcceptCommand` (deduplicating by request id), increments the workflow version, and returns the accepted command with the updated version. `requestId` is echoed when it parses as UUID, else a fresh v4 is generated.
 
 Request example:
 
@@ -639,7 +677,7 @@ Response:
 
 ### `GET /v1/automation/investigations/{run_id}`
 
-Stub.
+Real. Reads the persisted run and returns the projection, which contains the run summary plus the most recent accepted command.
 
 Response:
 
@@ -653,7 +691,7 @@ Response:
 
 ### `POST /v1/automation/issue-detection/analyze`
 
-Returns **202** (not 200). The response body is never parsed by Sentry.
+SIMULATED. Real issue detection needs the live event pipeline that feeds it, which is not reachable from faux-seer. Returns **202** (not 200). The response body is never parsed by Sentry.
 
 Request example:
 
@@ -669,7 +707,7 @@ Response (HTTP 202):
 
 ### `GET /v1/automation/issue-detection/check-budget/{org_id}?plan_tier=`
 
-Sentry fails open when absent.
+SIMULATED. faux-seer keeps no detection budget and always reports budget available; Sentry fails open when the value is absent.
 
 Response:
 
@@ -683,7 +721,13 @@ Response:
 
 ### `POST /v1/assisted-query/start`
 
-Sentry's outbox reads `run_id`.
+Real. Creates a persisted run via `runs.Service.Start` and dispatches a background `answerTask` that calls the LLM, grounded in code-index context when the organization has an index. Sentry's outbox reads `run_id`.
+
+Request example:
+
+```json
+{"organization_id": 1, "query": "Show me slow database queries", "project_ids": [1, 2]}
+```
 
 Response:
 
@@ -693,7 +737,7 @@ Response:
 
 ### `POST /v1/assisted-query/state`
 
-Passthrough to frontend.
+Real. Reads the persisted run and returns the session with `status`, `current_step`, `completed_steps`, and `final_response`.
 
 Response:
 
@@ -705,7 +749,7 @@ Response:
     "current_step": null,
     "completed_steps": [],
     "updated_at": "2026-05-12T05:39:26Z",
-    "final_response": null,
+    "final_response": "The slowest queries are...",
     "unsupported_reason": null
   }
 }
@@ -713,17 +757,23 @@ Response:
 
 ### `POST /v1/assisted-query/translate`
 
-Consumer reads `responses` and `unsupported_reason`.
+Real. Calls the LLM with the natural-language question and parses the model's JSON response into a list of `Query` objects. Code-index context is included when available. Consumer reads `responses` and `unsupported_reason`.
+
+Request example:
+
+```json
+{"organization_id": 1, "query": "Show me slow database queries", "project_ids": [1, 2]}
+```
 
 Response:
 
 ```json
-{"responses":[],"unsupported_reason":null}
+{"responses":[{"query":"avg-span(duration):avg:>500","stats_period":"14d","sort":"avg","group_by":["project"],"visualization":"line"}],"unsupported_reason":null}
 ```
 
 ### `POST /v1/assisted-query/translate-agentic`
 
-Passthrough to frontend.
+Real. Uses the same translation logic as `translate`.
 
 Response:
 
@@ -733,7 +783,7 @@ Response:
 
 ### `POST /v1/assisted-query/create-cache`
 
-Status-only consumer.
+SIMULATED. Prompt caching is an internal Seer optimization; Sentry only checks the HTTP status and never reads the body.
 
 Response:
 
@@ -744,6 +794,8 @@ Response:
 ---
 
 ## Anomaly detection, breakpoints, workflows
+
+SIMULATED: all endpoints in this section return empty-result shapes. Real anomaly detection requires a trained timeseries model and historical data store, neither of which faux-seer provides.
 
 ### `POST /v1/anomaly-detection/detect`
 
@@ -787,7 +839,7 @@ Response:
 
 ### `POST /v1/workflows/compare/cohort`
 
-Consumer iterates `results`.
+SIMULATED. Cohort comparison needs a metric/events backend, so the result list is always empty; the consumer iterates `results`.
 
 Response:
 
@@ -797,7 +849,7 @@ Response:
 
 ### `POST /trends/breakpoint-detector`
 
-Empty `data` means no breakpoints detected.
+SIMULATED. Breakpoint detection needs a statistical timeseries backend, so no breakpoints are ever reported; an empty `data` means none detected.
 
 Response:
 
@@ -809,9 +861,11 @@ Response:
 
 ## Code review, offboarding, PR metrics
 
+SIMULATED: `code_review/check/rerun`, `code_review/review-request`, and `code_review/pr-closed` are simulated acks. A full code-review agent is out of scope for faux-seer. The consumer discards the body and checks only the HTTP status.
+
 ### `POST /v1/code_review/check/rerun`
 
-Status-only consumer.
+SIMULATED. Status-only consumer.
 
 Response:
 
@@ -821,7 +875,7 @@ Response:
 
 ### `POST /v1/code_review/review-request`
 
-Status-only consumer.
+SIMULATED. Status-only consumer.
 
 Response:
 
@@ -831,7 +885,7 @@ Response:
 
 ### `POST /v1/code_review/pr-closed`
 
-Status-only consumer.
+SIMULATED. Status-only consumer.
 
 Response:
 
@@ -841,7 +895,18 @@ Response:
 
 ### `POST /v1/offboarding/repository`
 
-Status-only consumer.
+Real. Drops the repository's code index via `codeindex.DeleteRepo` so stale chunks are no longer surfaced in explorer searches. The `provider`, `repository_owner`, and `repository_name` are derived from the request's `repository_name` field (format `"owner/name"`). Always returns `{"success": true}`.
+
+Request example:
+
+```json
+{
+  "organization_id": 1,
+  "repository_id": 123,
+  "provider": "github",
+  "repository_name": "acme/app"
+}
+```
 
 Response:
 
@@ -851,9 +916,21 @@ Response:
 
 ### `POST /v1/pr-metrics/delegated-agent-match`
 
-Returns **202** (not 200). 202 means "no synchronous match"; returning 200 would require real run/agent state.
+Real. Looks up the autofix run by provider+PR pair or by PR URL substring in the state blob. On a match, returns HTTP 200 with `run_id`, `agent_id`, `signal_type`, and `match_path`. On no match, returns HTTP 202 (no synchronous match).
 
-Response (HTTP 202):
+Request example:
+
+```json
+{"organization_id": 1, "pull_request_id": 456, "provider": "github", "repo": "acme/app"}
+```
+
+Response (HTTP 200, match found):
+
+```json
+{"run_id":1,"agent_id":"agent-1","signal_type":"seer","match_path":"src/foo.py"}
+```
+
+Response (HTTP 202, no match):
 
 ```json
 {"success":true}
@@ -861,7 +938,7 @@ Response (HTTP 202):
 
 ### `POST /v1/pr-metrics/pr-close-judge`
 
-Status-only; the verdict arrives later via callback.
+SIMULATED. Status-only; the verdict arrives later via Sentry's callback path (`update_pr_metrics`). The consumer checks only the HTTP status code.
 
 Response:
 
@@ -917,7 +994,7 @@ Response:
 
 ### `POST /v0/issues/supergroups/cluster-lightweight`
 
-Ack stub. No clustering performed.
+SIMULATED. Lightweight RCA clustering needs a grouping model, so the payload is acknowledged and no artifact is produced.
 
 Request example:
 
@@ -965,7 +1042,7 @@ Response:
 
 ### `POST /v0/issues/severity-score`
 
-Deterministic heuristic. Severity is clamped to `[0, 1]`.
+Real. Calls the LLM for a severity JSON `{"severity": 0.0..1.0}`. Falls back to the deterministic token/heuristic scoring when the LLM fails, so the endpoint never 500s.
 
 Request example:
 
@@ -991,7 +1068,7 @@ Response:
 
 ### `POST /v1/llm/generate`
 
-Stub. Consumers parse `content` as JSON and handle failure.
+Real. Calls the LLM with the request's `system_prompt`, `prompt`, `temperature`, and `max_tokens` and returns `{"content": text, "model": model}`. Consumers parse `content` as JSON and handle failure.
 
 Request example:
 
@@ -1007,7 +1084,7 @@ Response:
 
 ### `POST /v1/monitoring-providers/gcp/verify-connection`
 
-Simulated. No GCP verification is performed.
+Real when `GCP_SERVICE_ACCOUNT_JSON` is configured. Loads the service account (inline JSON or filesystem path), exchanges a signed JWT for an OAuth2 access token, and checks project access via Cloud Resource Manager and Service Usage APIs. When the env var is unset, returns `"connected"` for every project without performing real verification.
 
 Request example:
 
@@ -1027,7 +1104,13 @@ Response:
 
 ### `POST /v1/project-preference/remove-repository`
 
-Ack stub. No preferences stored.
+Real. Removes the matching `{provider, external_id}` from the organization's stored repository preferences and saves. Idempotent: removing a repository twice reports success twice.
+
+Request example:
+
+```json
+{"organization_id": 1, "provider": "github", "external_id": "12345"}
+```
 
 Response:
 
@@ -1037,7 +1120,13 @@ Response:
 
 ### `POST /v1/project-preference/bulk-remove-repositories`
 
-Ack stub.
+Real. Removes all entries matching the request's `repositories` list and saves.
+
+Request example:
+
+```json
+{"organization_id": 1, "repositories": [{"provider": "github", "external_id": "12345"}, {"provider": "github", "external_id": "67890"}]}
+```
 
 Response:
 
@@ -1047,7 +1136,13 @@ Response:
 
 ### `POST /v1/project-preference/remove-handoffs-for-integration`
 
-Ack stub.
+Real. Clears the `integration_id` field for the organization and saves.
+
+Request example:
+
+```json
+{"organization_id": 1, "integration_id": 42}
+```
 
 Response:
 

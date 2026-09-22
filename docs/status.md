@@ -25,7 +25,7 @@ The current codebase includes:
 
 **Persistence and storage:**
 
-- SQLite app-state persistence (autofix runs, explorer runs, grouping records, supergroups)
+- SQLite app-state persistence (autofix runs, explorer runs, generic runs, run commands, replay breadcrumb summaries, project preferences, grouping records, supergroups)
 - Real `sqlite-vec` integration for the SQLite vector backend
 - Real `pgvector` integration for the advanced vector backend
 
@@ -47,53 +47,72 @@ The codebase also has passing:
 - `go vet ./...`
 - `go build ./...`
 
-## What is a stub or simulated rather than real
+## What is real versus simulated
 
-The following endpoints are acknowledgement stubs, simulated responses, or deterministic heuristics. They return valid, stable JSON but do not perform real work:
+Most endpoints now perform real work when the right credentials are configured. The following remain simulated because their dependencies are internal to Seer or require infrastructure not available externally.
 
-- **Acknowledgement stubs** (accept any JSON, return `{"success":true}`): `explorer/index`, `explorer/index/org-repo-knowledge`, `explorer/index/org-project-knowledge`, `explorer/index/sentry-knowledge`, `explorer/export-indexes`, `explorer/repos`, `explorer/service-map/update`, `agent/feature/run`, `codegen/unit-tests`, `assisted-query/create-cache`, `anomaly-detection/store`, `anomaly-detection/delete-alert-data`, `code_review/check/rerun`, `code_review/review-request`, `code_review/pr-closed`, `offboarding/repository`, `supergroups/cluster-lightweight`, `project-preference/remove-repository`, `project-preference/bulk-remove-repositories`, `project-preference/remove-handoffs-for-integration`
-- **Simulated responses** (structured but not real): `anomaly-detection/detect` (empty timeseries), `anomaly-detection/alert-data` (empty data), `workflows/compare/cohort` (empty results), `trends/breakpoint-detector` (empty data), `monitoring-providers/gcp/verify-connection` (always "connected"), `llm/generate` (empty content/model)
-- **Deterministic heuristics** (simple logic, not LLM-backed): `issues/severity-score`, `summarize/trace`, `summarize/fixability`
-- **Derived/stub summaries**: `summarize/feedback/spam-detection`, `summarize/feedback/labels`, `summarize/feedback/title`, `summarize/feedback/label-groups`, `summarize/feedback/summarize`, `summarize/replay/breadcrumbs/start`, `summarize/replay/breadcrumbs/state`, `summarize/replay/breadcrumbs/delete`
-- **Stub state stores**: `investigations` (POST), `investigations/{run_id}/commands`, `investigations/{run_id}` (GET), `assisted-query/start`, `assisted-query/state`, `assisted-query/translate`, `assisted-query/translate-agentic`, `oneshot/run`
-- **202 ack stubs** (accepted but not processed): `issue-detection/analyze`, `pr-metrics/delegated-agent-match`
-- **Lightweight ack**: `pr-metrics/pr-close-judge`, `issue-detection/check-budget/{org_id}`
+**Still simulated (by design):**
+
+- `explorer/index` (generic) — the request carries only org and project ids, no repository identity
+- `explorer/index/org-project-knowledge` — requires Seer-internal project metadata
+- `explorer/index/sentry-knowledge` — Sentry's documentation corpus is not reachable
+- `explorer/export-indexes` — export format and destination are internal to Seer
+- `explorer/service-map/update` — faux-seer stores no service map
+- `issue-detection/analyze` (202 ack) — requires the event-processing pipeline that feeds detection
+- `issue-detection/check-budget/{org_id}` — no budget store; always returns `{"has_budget": true}`
+- `anomaly-detection/*` — requires a trained timeseries model and historical data store
+- `workflows/compare/cohort` — requires a metric/events backend
+- `trends/breakpoint-detector` — requires a statistical timeseries backend
+- `code_review/*` — a full code-review agent is out of scope
+- `pr-metrics/pr-close-judge` — the verdict arrives later via Sentry's callback path
+- `supergroups/cluster-lightweight` — requires a grouping model
+- `assisted-query/create-cache` — internal prompt-caching optimization
+- `monitoring-providers/gcp/verify-connection` — simulated when `GCP_SERVICE_ACCOUNT_JSON` is unset
+
+**Now real (when configured):**
+
+- `explorer/chat` — async run with LLM, code-index augmentation
+- `explorer/repos` — stored preferences or configured provider's repos
+- `explorer/index/org-repo-knowledge` — fetches, chunks, embeds, stores repository code
+- `agent/feature/run` — persisted run with LLM, idempotency key
+- `autofix/coding-agent/state/set` — lazy run creation, background LLM advancement
+- `summarize/trace`, `summarize/fixability` — LLM-backed with heuristic fallback
+- `feedback/*` — all five endpoints call the LLM
+- `replay/breadcrumbs/*` — persisted in SQLite, LLM-summarized
+- `severity-score` — LLM with deterministic heuristic fallback
+- `llm/generate` — LLM-backed
+- `oneshot/run` — LLM-backed
+- `codegen/unit-tests` — real when repository provider configured
+- `investigations` — persisted runs with LLM workflow step
+- `assisted-query/start/state/translate/translate-agentic` — LLM-backed with code-index context
+- `offboarding/repository` — drops code index
+- `pr-metrics/delegated-agent-match` — real autofix run lookup
+- `project-preference/*` — persisted per-org repository preferences
+- `monitoring-providers/gcp/verify-connection` — real when `GCP_SERVICE_ACCOUNT_JSON` configured
 
 ## Main gaps still remaining
 
-### 1. Autofix is not a real Seer-like agent loop
+### 1. Autofix uses a single LLM turn, not Seer's multi-turn tool-use loop
 
-faux-seer persists the coding-agent state snapshots Sentry reports, but it does **not** implement Seer's orchestration model. Runs themselves are created and advanced by Seer in a real deployment.
+faux-seer advances the coding agent with a single LLM call per state-set. Seer's real agent loop involves iterative model/tool/model turns, tool invocation, and richer state transitions over time. The background advancement task observes cancellation and persists `"shutdown"` on process exit, but the execution model is simpler than Seer's.
 
-Missing pieces include:
+### 2. Only GitHub is implemented as a repository provider
 
-- run creation and a background execution loop
-- tool invocation and iterative model/tool/model turns
-- richer run state transitions over time
-- cancellation-aware shutdown behavior that marks in-flight work as cancelled
-- more realistic coding-agent execution behavior
+GitLab, Gitea, and Bitbucket are recognised by the factory but not implemented. When their tokens are set, `NewProvider` returns `ErrNotConfigured` and repository-backed endpoints fall back to simulated responses.
 
-Today, autofix is best understood as a compatibility stub that stores coding-agent state for runs Sentry tells it about.
+### 3. Several Seer-only behaviors remain simulated
 
-### 2. Behavior parity is still partial
+The following endpoints are intentionally simulated because their dependencies are internal to Seer or require infrastructure not available externally:
 
-The project aims for wire compatibility first, not full behavior parity with Python Seer.
+- anomaly detection, breakpoint detection, cohort comparison (timeseries/statistical backends)
+- code review (full code-review agent)
+- issue detection (event-processing pipeline)
+- supergroup clustering (grouping model)
+- explorer index/sentry-knowledge, export-indexes, service-map/update (Seer-internal)
 
-Areas that remain heuristic, simplified, or acknowledgement-only:
+These endpoints return stable, structured responses that satisfy Sentry's parsing.
 
-- autofix state progression
-- explorer indexing, repo listing, lightweight clustering, and agent feature runs
-- severity scoring
-- issue summaries
-- fixability output
-- assisted query, anomaly detection, breakpoints, workflows
-- code review, offboarding, PR metrics
-- project-preference maintenance
-- GCP verification, LLM/generate
-
-These endpoints return stable, structured responses, but their logic is intentionally much simpler than real Seer.
-
-### 3. Runtime validation is incomplete in this environment
+### 4. Runtime validation is incomplete in this environment
 
 The checked-in Docker and backend code is in place, but this session environment could not perform full Docker runtime validation because Docker daemon access was denied.
 
@@ -104,7 +123,7 @@ That means the following still need verification in a Docker-capable environment
 - health checks against the running container
 - validation that the Debian trixie image runs correctly with the CGO-linked `sqlite-vec` binary
 
-### 4. End-to-end validation against real Sentry is still pending
+### 5. End-to-end validation against real Sentry is still pending
 
 The service was designed against local `seer` and `sentry` source contracts, but it still needs full live validation against an actual Sentry deployment.
 
@@ -116,7 +135,7 @@ Recommended checks:
 - confirm grouping similarity behavior using real event payloads
 - confirm summaries and severity are acceptable for the target workflow
 
-### 5. Production-like backend validation is still limited
+### 6. Production-like backend validation is still limited
 
 Both vector backends are implemented, but neither has been thoroughly exercised under production-like load in this environment.
 
@@ -126,17 +145,15 @@ Still recommended:
 - test `pgvector` against a live Postgres instance using real embeddings
 - verify behavior for deletes, threshold tuning, and larger similarity datasets
 
-### 6. Some schema and behavior tradeoffs remain intentionally pragmatic
+### 7. Some schema and behavior tradeoffs remain intentionally pragmatic
 
 The current implementation optimizes for compatibility and maintainability over perfect parity.
 
 Examples:
 
 - app state remains in SQLite even when `pgvector` is enabled
-- summaries and severity use simplified logic
-- there are legacy SQLite grouping tables still present in the shared schema even though the active `sqlitevec` backend now uses its own `sqlite-vec`-aware table
 - the vector store contract still exposes supergroup insert support even though no route writes supergroups
-- acknowledgement stubs return synthetic run ids because faux-seer keeps no feature-run records
+- there are legacy SQLite grouping tables still present in the shared schema even though the active `sqlitevec` backend now uses its own `sqlite-vec`-aware table
 
 These are not blockers, but they are useful to keep in mind if the next phase is cleanup or higher-fidelity parity.
 
@@ -144,16 +161,17 @@ These are not blockers, but they are useful to keep in mind if the next phase is
 
 If you continue from here, the highest-value next tasks are:
 
-1. Validate Docker runtime in an environment with Docker daemon access.
-2. Connect a real Sentry instance and test end-to-end flows.
-3. Replace the explorer index/repo/agent feature-run stubs with real behavior.
-4. Increase behavior fidelity for summaries, severity, and autofix state.
-5. Stress-test `sqlite-vec` and `pgvector` with realistic data.
+1. Implement GitLab, Gitea, or Bitbucket as repository providers so non-GitHub orgs get real behavior.
+2. Validate Docker runtime in an environment with Docker daemon access.
+3. Connect a real Sentry instance and test end-to-end flows (especially explorer chat async lifecycle, autofix background advancement, and delegated-agent-match).
+4. Increase autofix fidelity: multi-turn tool-use loop, richer state transitions, cancellation-aware shutdown.
+5. Stress-test `sqlite-vec` and `pgvector` with realistic embedding dimensions, record counts, and code-index chunk volumes.
 
 ## Suggested handoff checklist
 
 Before the next implementation phase, make sure you know:
 
-- which gap matters most: runtime validation, Sentry integration, or autofix fidelity
+- whether the target org uses GitHub or needs a different repository provider
 - whether compatibility is sufficient or whether behavior parity is now the goal
 - whether the next environment has Docker daemon access and a real Sentry instance available
+- whether `GITHUB_TOKEN`, `GCP_SERVICE_ACCOUNT_JSON`, and a non-stub `LLM_PROVIDER` are configured for real behavior

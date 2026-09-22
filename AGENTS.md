@@ -8,7 +8,7 @@ This file summarizes the current engineering context for `faux-seer` so future a
 
 ## Current compatibility surface
 
-Implemented HTTP routes are exactly the paths Sentry's Seer client can issue:
+Implemented HTTP routes are exactly the paths Sentry's Seer client can issue (63 Seer paths + 3 health = 66 routes):
 
 - health: `GET /health`, `GET /health/live`, `GET /health/ready`
 - agent/explorer: `POST /v1/automation/agent/feature/run`, `POST /v1/automation/explorer/{chat,state,state/pr,update,repos}`,
@@ -35,6 +35,11 @@ Implemented HTTP routes are exactly the paths Sentry's Seer client can issue:
   `GET /v1/models`, `POST /v1/llm/generate`, `POST /v1/monitoring-providers/gcp/verify-connection`
 - project preference maintenance: `POST /v1/project-preference/{remove-repository,bulk-remove-repositories,remove-handoffs-for-integration}`
 
+**Real vs simulated:** Most endpoints now perform real work when the right credentials are configured. Key unlocks:
+- `GITHUB_TOKEN` → explorer repos, org-repo indexing, codegen, offboarding, delegated-agent-match
+- Non-stub `LLM_PROVIDER` + `EMBEDDING_PROVIDER` → all summaries, feedback, severity, LLM generate, oneshot, assisted-query translate, investigations, explorer chat
+- `GCP_SERVICE_ACCOUNT_JSON` → real GCP connection verification
+
 Routes are limited to Seer endpoints reachable from Sentry's Seer client layer (`src/sentry/seer/**` plus
 `feedback/lib/seer_api.py`, `replays/lib/seer_api.py`, `investigations/seer_client.py`, `pr_metrics/judge.py`,
 `tasks/llm_issue_detection/detection.py`, `integrations/gcp/client.py`, `event_manager.py`, `deletions/tasks/seer.py`).
@@ -57,11 +62,17 @@ If no shared secret is configured, auth verification is skipped for local develo
 The project intentionally uses split storage:
 
 - SQLite app DB:
-  - autofix run state
-  - explorer run state
+  - autofix runs (with `status` column, `provider`/`pr_id` for delegated-agent-match)
+  - explorer runs (with `status` column)
+  - generic runs (`runs` table with `kind`, `idempotency_key`, `status`, `workflow_version`)
+  - run commands (`run_commands` table with deduplicated `request_id`)
+  - replay breadcrumb summaries (`replay_breadcrumb_summaries` table)
+  - project preferences (`project_preferences` table with `repos_json` and `integration_id`)
+  - grouping records and supergroups
 - Vector store backend:
   - grouping similarity vectors
   - supergroup artifacts
+  - code-indexed repository chunks (`sqlitevec_code_chunks` or `code_chunks`)
 
 Two vector backends exist:
 
@@ -73,7 +84,7 @@ Two vector backends exist:
   - Postgres + `vector` extension
   - configured with `VECTOR_STORE=pgvector`
 
-Important: even when `pgvector` is enabled, autofix and explorer state remain on SQLite by design.
+Important: even when `pgvector` is enabled, autofix, explorer, run, replay, and preference state remain on SQLite by design.
 
 ## Model configuration
 
@@ -139,18 +150,19 @@ A full `docker build` could not be run in the current environment earlier becaus
 
 ## Known limitations
 
-- Behavior is compatibility-focused and heuristic in several places.
-- Autofix only persists coding-agent state; it does not reproduce Seer's full Python agent loop.
-- Explorer indexing, repo, cluster-lightweight, and agent feature-run endpoints are acknowledgement stubs.
-- `pgvector` only covers vector-backed surfaces, not all persistence.
-- The local toolchain rewrote `go.mod` to `go 1.26.1`; that is currently the validated module state in this environment.
+- Only GitHub is implemented as a repository provider; GitLab, Gitea, and Bitbucket are recognised but return `ErrNotConfigured`.
+- Autofix advances the coding agent with a single LLM call per state-set, not Seer's multi-turn tool-use loop.
+- Explorer chat replies are grounded in code-index chunks when available, but there is no interactive exploration or tool-use loop.
+- Explorer index/org-project-knowledge, index/sentry-knowledge, export-indexes, and service-map/update remain simulated.
+- Anomaly detection, breakpoint detection, cohort comparison, code review, and issue detection remain simulated.
+- App state stays on SQLite even when `pgvector` is enabled.
 
 ## Best next steps
 
 If more work is requested, likely next areas are:
 
-- richer autofix coding-agent state transitions
-- stronger pgvector integration tests against a real Postgres service
+- Implement GitLab, Gitea, or Bitbucket as repository providers
+- Richer autofix coding-agent state transitions (multi-turn tool-use loop)
+- Stronger pgvector integration tests against a real Postgres service
 - Docker build/runtime validation in an environment with daemon access
-- more complete issue-summary / severity behavior against real providers
-- real explorer indexing and repo tracking behind the acknowledgement stubs
+- End-to-end validation against a real Sentry instance (especially explorer chat async lifecycle and delegated-agent-match)

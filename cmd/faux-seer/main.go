@@ -13,15 +13,26 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aldy505/faux-seer/internal/assistedquery"
 	"github.com/aldy505/faux-seer/internal/autofix"
+	"github.com/aldy505/faux-seer/internal/codeindex"
 	"github.com/aldy505/faux-seer/internal/config"
 	"github.com/aldy505/faux-seer/internal/db"
 	"github.com/aldy505/faux-seer/internal/embedding"
 	"github.com/aldy505/faux-seer/internal/explorer"
+	"github.com/aldy505/faux-seer/internal/feedback"
+	"github.com/aldy505/faux-seer/internal/generation"
+	"github.com/aldy505/faux-seer/internal/git"
 	"github.com/aldy505/faux-seer/internal/handler"
+	"github.com/aldy505/faux-seer/internal/investigations"
 	issuesummary "github.com/aldy505/faux-seer/internal/issueSummary"
 	"github.com/aldy505/faux-seer/internal/llm"
+	"github.com/aldy505/faux-seer/internal/monitoring"
 	"github.com/aldy505/faux-seer/internal/observability"
+	"github.com/aldy505/faux-seer/internal/preferences"
+	"github.com/aldy505/faux-seer/internal/replay"
+	"github.com/aldy505/faux-seer/internal/runmgr"
+	"github.com/aldy505/faux-seer/internal/runs"
 	"github.com/aldy505/faux-seer/internal/severity"
 	"github.com/aldy505/faux-seer/internal/similarity"
 	vectorstorefactory "github.com/aldy505/faux-seer/internal/vectorstorefactory"
@@ -73,12 +84,40 @@ func main() {
 		defer closer.Close()
 	}
 
-	autofixService := autofix.New(store, llmClient)
-	explorerService := explorer.New(store, llmClient)
-	similarityService := similarity.New(cfg, embeddingClient, vectorStore)
-	severityService := severity.New(llmClient)
-	issueSummaryService := issuesummary.New(llmClient)
-	server := handler.New(cfg, logger, autofixService, explorerService, similarityService, severityService, issueSummaryService)
+	// A provider needs credentials; without them repository-backed endpoints
+	// answer with a simulated response instead of failing.
+	gitProvider, err := git.NewProvider(cfg, "github")
+	if err != nil {
+		logger.InfoContext(ctx, "repository provider unavailable; repository-backed endpoints are simulated", "error", err)
+		gitProvider = nil
+	}
+
+	runManager := runmgr.New(ctx, logger)
+	codeIndex := codeindex.New(gitProvider, embeddingClient, vectorStore, cfg.CodeIndexChunkSize, cfg.CodeIndexChunkOverlap)
+	runService := runs.New(store, llmClient, runManager)
+
+	server := handler.New(handler.Services{
+		Config:         cfg,
+		Logger:         logger,
+		Store:          store,
+		LLM:            llmClient,
+		Git:            gitProvider,
+		CodeIndex:      codeIndex,
+		Runs:           runManager,
+		Autofix:        autofix.New(store, llmClient, runManager),
+		Explorer:       explorer.New(store, llmClient, codeIndex, runManager),
+		Similarity:     similarity.New(cfg, embeddingClient, vectorStore),
+		Severity:       severity.New(llmClient),
+		IssueSummary:   issuesummary.New(llmClient),
+		Feedback:       feedback.New(llmClient),
+		Replay:         replay.New(store, llmClient),
+		Generation:     generation.New(llmClient, gitProvider, cfg),
+		RunStore:       runService,
+		Investigations: investigations.New(runService),
+		AssistedQuery:  assistedquery.New(runService, codeIndex),
+		Preferences:    preferences.New(store),
+		Monitoring:     monitoring.New(cfg),
+	})
 
 	httpServer := &http.Server{Addr: cfg.Addr, Handler: obs.WrapHTTP(server.Routes())}
 	go func() {
@@ -93,10 +132,16 @@ func main() {
 	<-ctx.Done()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	// Background runs are cancelled before the process exits so an in-flight run
+	// persists its terminal "shutdown" state instead of being killed mid-write.
+	runManager.CancelAll()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		logger.ErrorContext(ctx, "http server shutdown failed", "error", err)
 		obs.Flush(2 * time.Second)
 		os.Exit(1)
+	}
+	if err := runManager.WaitContext(shutdownCtx); err != nil {
+		logger.ErrorContext(ctx, "background runs did not finish", "error", err)
 	}
 }
 

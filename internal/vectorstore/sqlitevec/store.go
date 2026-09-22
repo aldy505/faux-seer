@@ -167,9 +167,154 @@ CREATE TABLE IF NOT EXISTS sqlitevec_grouping_records (
 	PRIMARY KEY(project_id, hash)
 );
 CREATE INDEX IF NOT EXISTS idx_sqlitevec_grouping_records_project ON sqlitevec_grouping_records(project_id);
-`, checkConstraint)
+
+CREATE TABLE IF NOT EXISTS sqlitevec_code_chunks (
+	organization_id INTEGER NOT NULL,
+	provider TEXT NOT NULL,
+	owner TEXT NOT NULL,
+	name TEXT NOT NULL,
+	ref TEXT NOT NULL,
+	path TEXT NOT NULL,
+	chunk_index INTEGER NOT NULL,
+	start_line INTEGER NOT NULL,
+	end_line INTEGER NOT NULL,
+	text TEXT NOT NULL,
+	vector BLOB NOT NULL CHECK(%s),
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY(organization_id, provider, owner, name, ref, path, chunk_index)
+);
+CREATE INDEX IF NOT EXISTS idx_sqlitevec_code_chunks_org ON sqlitevec_code_chunks(organization_id);
+CREATE INDEX IF NOT EXISTS idx_sqlitevec_code_chunks_repo ON sqlitevec_code_chunks(provider, owner, name);
+`, checkConstraint, checkConstraint)
 	if _, err := s.db.DB.ExecContext(ctx, statement); err != nil {
 		return fmt.Errorf("run sqlite-vec migration: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) UpsertCodeChunks(ctx context.Context, chunks []vectorstore.CodeChunk) error {
+	if len(chunks) == 0 {
+		return nil
+	}
+	tx, err := s.db.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin sqlite-vec code chunk tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	stmt, err := tx.PrepareContext(ctx, `
+INSERT INTO sqlitevec_code_chunks (
+	organization_id, provider, owner, name, ref, path, chunk_index, start_line, end_line, text, vector, created_at
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+ON CONFLICT(organization_id, provider, owner, name, ref, path, chunk_index) DO UPDATE
+SET start_line = excluded.start_line,
+    end_line = excluded.end_line,
+    text = excluded.text,
+    vector = excluded.vector
+`)
+	if err != nil {
+		return fmt.Errorf("prepare sqlite-vec code chunk upsert: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, chunk := range chunks {
+		serialized, err := sqlite_vec.SerializeFloat32(chunk.Vector)
+		if err != nil {
+			return fmt.Errorf("serialize sqlite-vec code chunk vector: %w", err)
+		}
+		if _, err := stmt.ExecContext(
+			ctx,
+			chunk.OrganizationID,
+			chunk.Provider,
+			chunk.Owner,
+			chunk.Name,
+			chunk.Ref,
+			chunk.Path,
+			chunk.ChunkIndex,
+			chunk.StartLine,
+			chunk.EndLine,
+			chunk.Text,
+			serialized,
+		); err != nil {
+			return fmt.Errorf("exec sqlite-vec code chunk upsert: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit sqlite-vec code chunk tx: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) SearchCode(ctx context.Context, vector []float32, k int, filters vectorstore.CodeFilters) ([]vectorstore.CodeResult, error) {
+	if k <= 0 {
+		k = 10
+	}
+	serialized, err := sqlite_vec.SerializeFloat32(vector)
+	if err != nil {
+		return nil, fmt.Errorf("serialize sqlite-vec code query vector: %w", err)
+	}
+
+	conditions := []string{"organization_id = ?"}
+	args := []any{serialized, filters.OrganizationID}
+	for _, filter := range []struct {
+		value  string
+		column string
+	}{
+		{filters.Provider, "provider"},
+		{filters.Owner, "owner"},
+		{filters.Name, "name"},
+		{filters.Ref, "ref"},
+	} {
+		if filter.value == "" {
+			continue
+		}
+		conditions = append(conditions, filter.column+" = ?")
+		args = append(args, filter.value)
+	}
+
+	query := `
+SELECT provider, owner, name, ref, path, chunk_index, start_line, end_line, text, distance
+FROM (
+	SELECT provider, owner, name, ref, path, chunk_index, start_line, end_line, text,
+		vec_distance_cosine(vector, ?) AS distance
+	FROM sqlitevec_code_chunks
+	WHERE ` + strings.Join(conditions, " AND ") + `
+)
+ORDER BY distance ASC
+LIMIT ?`
+	args = append(args, k)
+
+	rows, err := s.db.DB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query sqlite-vec code chunks: %w", err)
+	}
+	defer rows.Close()
+
+	results := make([]vectorstore.CodeResult, 0, k)
+	for rows.Next() {
+		var item vectorstore.CodeResult
+		if err := rows.Scan(&item.Provider, &item.Owner, &item.Name, &item.Ref, &item.Path, &item.ChunkIndex, &item.StartLine, &item.EndLine, &item.Text, &item.Distance); err != nil {
+			return nil, fmt.Errorf("scan sqlite-vec code chunk: %w", err)
+		}
+		results = append(results, item)
+	}
+	return results, rows.Err()
+}
+
+func (s *Store) DeleteCodeRepo(ctx context.Context, organizationID int64, provider, owner, name string) (bool, error) {
+	_, err := s.db.DB.ExecContext(ctx, `DELETE FROM sqlitevec_code_chunks WHERE organization_id = ? AND provider = ? AND owner = ? AND name = ?`, organizationID, provider, owner, name)
+	if err != nil {
+		return false, fmt.Errorf("delete sqlite-vec code chunks: %w", err)
+	}
+	return true, nil
+}
+
+func (s *Store) HasCodeChunks(ctx context.Context, organizationID int64) (bool, error) {
+	var exists bool
+	if err := s.db.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlitevec_code_chunks WHERE organization_id = ?)`, organizationID).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check sqlite-vec code chunks: %w", err)
+	}
+	return exists, nil
 }

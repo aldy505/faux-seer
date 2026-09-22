@@ -28,6 +28,7 @@ func TestExplorerChatStartAndState(t *testing.T) {
 	if started.RunID == 0 {
 		t.Fatalf("expected non-zero run_id, got %#v", started)
 	}
+	waitForExplorerRun(t, server, 1, started.RunID)
 
 	statePayload := []byte(`{"organization_id":1,"run_id":` + jsonNumber(started.RunID) + `}`)
 	stateResp := issueRequest(server, http.MethodPost, "/v1/automation/explorer/state", statePayload)
@@ -92,6 +93,7 @@ func TestExplorerChatContinueAndRuns(t *testing.T) {
 	if err := json.Unmarshal(firstResp.Body.Bytes(), &started); err != nil {
 		t.Fatalf("decode start response: %v", err)
 	}
+	waitForExplorerRun(t, server, 1, started.RunID)
 	continuePayload := []byte(`{
 		"organization_id":1,
 		"run_id":` + jsonNumber(started.RunID) + `,
@@ -102,6 +104,7 @@ func TestExplorerChatContinueAndRuns(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", continueResp.Code, continueResp.Body.String())
 	}
 
+	waitForExplorerRun(t, server, 1, started.RunID)
 	stateResp := issueRequest(server, http.MethodPost, "/v1/automation/explorer/state", []byte(`{"organization_id":1,"run_id":`+jsonNumber(started.RunID)+`}`))
 	var state struct {
 		Session struct {
@@ -179,6 +182,7 @@ func TestExplorerUpdateAndStatePR(t *testing.T) {
 	if err := json.Unmarshal(startResp.Body.Bytes(), &started); err != nil {
 		t.Fatalf("decode start response: %v", err)
 	}
+	waitForExplorerRun(t, server, 1, started.RunID)
 	updateResp := issueRequest(server, http.MethodPost, "/v1/automation/explorer/update", []byte(`{
 		"organization_id":1,
 		"run_id":`+jsonNumber(started.RunID)+`,

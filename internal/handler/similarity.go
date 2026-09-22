@@ -34,9 +34,14 @@ func (s *Server) deleteGroupingByHash(w http.ResponseWriter, r *http.Request, bo
 	s.writeJSON(w, 200, response)
 }
 
+// SIMULATED: faux-seer has no grouping model for lightweight RCA clustering.
+// The endpoint acknowledges the request so Sentry's grouping pipeline does not
+// fail. The consumer expects only HTTP 200 with a success ack.
+
 // supergroupClusterLightweight acknowledges Seer's lightweight RCA clustering
-// request. faux-seer stores no clustering state, so it validates the payload and
-// reports success without producing an artifact.
+// request. SIMULATED: Real lightweight RCA clustering requires a grouping
+// model that faux-seer does not implement. The consumer expects only HTTP 200
+// with a success ack; no artifact is produced.
 func (s *Server) supergroupClusterLightweight(w http.ResponseWriter, r *http.Request, body []byte) {
 	var request struct {
 		OrganizationID int64          `json:"organization_id"`

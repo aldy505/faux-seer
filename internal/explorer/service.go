@@ -1,26 +1,40 @@
-// Package explorer implements a compatibility-focused Seer Explorer backend.
+// Package explorer implements Seer's Explorer backend: chat runs execute in the
+// background and are polled through the state endpoints.
 package explorer
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
+	"github.com/aldy505/faux-seer/internal/codeindex"
 	"github.com/aldy505/faux-seer/internal/db"
 	"github.com/aldy505/faux-seer/internal/llm"
+	"github.com/aldy505/faux-seer/internal/runmgr"
 )
 
-// Service orchestrates minimal explorer chat/state compatibility.
+// Service orchestrates explorer chat runs.
 type Service struct {
-	store *db.Store
-	llm   llm.Client
+	store     *db.Store
+	llm       llm.Client
+	codeIndex *codeindex.Service
+	runs      *runmgr.Manager
+	// mu serializes state transitions. A run executes in the background while
+	// update requests mutate the same record, and both write the whole state
+	// blob, so read-modify-write sequences must not interleave.
+	mu sync.Mutex
 }
 
-// New creates an explorer service.
-func New(store *db.Store, llmClient llm.Client) *Service {
-	return &Service{store: store, llm: llmClient}
+// New creates an explorer service. codeIndex and runs may be nil, in which case
+// chat replies are generated without repository context and runs execute
+// in-place.
+func New(store *db.Store, llmClient llm.Client, codeIndex *codeindex.Service, runs *runmgr.Manager) *Service {
+	return &Service{store: store, llm: llmClient, codeIndex: codeIndex, runs: runs}
 }
 
 // ChatResponse mirrors the explorer chat start/continue payload.
@@ -88,6 +102,9 @@ type RunState struct {
 	OwnerUserID      *int64                 `json:"owner_user_id,omitempty"`
 	PendingUserInput *PendingUserInput      `json:"pending_user_input,omitempty"`
 	RepoPRStates     map[string]RepoPRState `json:"repo_pr_states"`
+	// FailureReason is Sentry's own field for a classified failure; the run
+	// status stays the primary signal, and this only adds detail.
+	FailureReason *string `json:"failure_reason,omitempty"`
 }
 
 // AgentRun is an AgentRun-compatible subset.
@@ -211,7 +228,11 @@ func (s *Service) GetRunsByIDs(ctx context.Context, raw json.RawMessage) (RunsRe
 	return RunsResponse{Data: data}, nil
 }
 
-// Update applies a compatibility-focused explorer update payload.
+// Update applies an explorer update payload to the stored run.
+//
+// The payload types Sentry sends are interrupts, user-input responses, and PR
+// creation requests. Each mutates the run under the service lock because a chat
+// reply may be landing in the same record concurrently.
 func (s *Service) Update(ctx context.Context, raw json.RawMessage) (UpdateResponse, error) {
 	var request updateRequest
 	if err := json.Unmarshal(raw, &request); err != nil {
@@ -220,6 +241,10 @@ func (s *Service) Update(ctx context.Context, raw json.RawMessage) (UpdateRespon
 	if request.OrganizationID == 0 {
 		return UpdateResponse{}, fmt.Errorf("organization_id is required")
 	}
+	payloadType, _ := request.Payload["type"].(string)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	record, err := s.store.GetExplorerRun(ctx, request.RunID)
 	if err != nil {
 		return UpdateResponse{}, err
@@ -231,12 +256,23 @@ func (s *Service) Update(ctx context.Context, raw json.RawMessage) (UpdateRespon
 	if err != nil {
 		return UpdateResponse{}, err
 	}
-	payloadType, _ := request.Payload["type"].(string)
+	var resumeQuery string
 	switch payloadType {
 	case "interrupt":
-		state.Status = "completed"
-	case "user_input_response":
+		state.Status = db.RunStatusCompleted
 		state.PendingUserInput = nil
+	case "user_input_response":
+		resumeQuery = submittedInput(request.Payload)
+		state.PendingUserInput = nil
+		if resumeQuery == "" {
+			state.Status = db.RunStatusCompleted
+			break
+		}
+		state.Blocks = append(state.Blocks, makeBlock("user", resumeQuery, len(state.Blocks)+1, nowTimestamp()))
+		state.Status = db.RunStatusProcessing
+	case "awaiting_user_input":
+		state.Status = db.RunStatusAwaiting
+		state.PendingUserInput = pendingUserInput(request.Payload)
 	case "create_pr":
 		repoName, _ := request.Payload["repo_name"].(string)
 		if repoName != "" {
@@ -247,16 +283,51 @@ func (s *Service) Update(ctx context.Context, raw json.RawMessage) (UpdateRespon
 			}
 		}
 	}
+	state.FailureReason = nil
 	state.UpdatedAt = nowTimestamp()
+	state.RunID = record.ID
+	record.Status = state.Status
+	record.LastTriggeredAt = state.UpdatedAt
 	record.StateJSON, err = json.Marshal(state)
 	if err != nil {
 		return UpdateResponse{}, fmt.Errorf("marshal explorer update state: %w", err)
 	}
-	record.LastTriggeredAt = state.UpdatedAt
 	if err := s.store.UpdateExplorerRun(ctx, *record); err != nil {
 		return UpdateResponse{}, err
 	}
+	if resumeQuery != "" {
+		s.dispatch(record.ID, request.OrganizationID, resumeQuery, nil, nil)
+	}
 	return UpdateResponse{RunID: request.RunID}, nil
+}
+
+// submittedInput extracts the user's answer from a user_input_response payload.
+func submittedInput(payload map[string]any) string {
+	for _, key := range []string{"response", "input", "content", "message", "text", "answer"} {
+		if value, ok := payload[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+// pendingUserInput builds the persisted pending-input record from a payload.
+func pendingUserInput(payload map[string]any) *PendingUserInput {
+	raw, ok := payload["pending_user_input"].(map[string]any)
+	if !ok {
+		return &PendingUserInput{ID: "pending-input", InputType: "user_input", Data: map[string]any{}}
+	}
+	input := &PendingUserInput{ID: "pending-input", InputType: "user_input", Data: raw}
+	if id, ok := raw["id"].(string); ok && id != "" {
+		input.ID = id
+	}
+	if inputType, ok := raw["input_type"].(string); ok && inputType != "" {
+		input.InputType = inputType
+	}
+	if data, ok := raw["data"].(map[string]any); ok {
+		input.Data = data
+	}
+	return input
 }
 
 // GetStateByPR returns a run state by provider/pr pair.
@@ -285,15 +356,9 @@ func (s *Service) GetStateByPR(ctx context.Context, raw json.RawMessage) (StateR
 func (s *Service) startRun(ctx context.Context, request chatRequest) (ChatResponse, error) {
 	userID := extractUserID(request.UserOrgContext)
 	timestamp := nowTimestamp()
-	userBlock := makeBlock("user", request.Query, 1, timestamp)
-	assistantReply, err := s.generateReply(ctx, request.Query, request.PageName, request.OnPageContext)
-	if err != nil {
-		return ChatResponse{}, err
-	}
-	assistantBlock := makeBlock("assistant", assistantReply, 2, timestamp)
 	state := RunState{
-		Blocks:       []MemoryBlock{userBlock, assistantBlock},
-		Status:       "completed",
+		Blocks:       []MemoryBlock{makeBlock("user", request.Query, 1, timestamp)},
+		Status:       db.RunStatusProcessing,
 		UpdatedAt:    timestamp,
 		OwnerUserID:  userID,
 		RepoPRStates: map[string]RepoPRState{},
@@ -308,6 +373,7 @@ func (s *Service) startRun(ctx context.Context, request chatRequest) (ChatRespon
 		Title:           summarizeTitle(request.Query),
 		CategoryKey:     request.CategoryKey,
 		CategoryValue:   request.CategoryValue,
+		Status:          db.RunStatusProcessing,
 		StateJSON:       stateJSON,
 		CreatedAt:       timestamp,
 		LastTriggeredAt: timestamp,
@@ -326,11 +392,8 @@ func (s *Service) startRun(ctx context.Context, request chatRequest) (ChatRespon
 	if err := s.store.UpdateExplorerRun(ctx, record); err != nil {
 		return ChatResponse{}, err
 	}
-	return ChatResponse{
-		RunID:                runID,
-		HasExplorerIndex:     true,
-		HasOrgProjectContext: true,
-	}, nil
+	s.dispatch(runID, request.OrganizationID, request.Query, request.PageName, request.OnPageContext)
+	return s.chatResponse(ctx, request.OrganizationID, runID), nil
 }
 
 func (s *Service) continueRun(ctx context.Context, request chatRequest) (ChatResponse, error) {
@@ -346,12 +409,6 @@ func (s *Service) continueRun(ctx context.Context, request chatRequest) (ChatRes
 		return ChatResponse{}, err
 	}
 	timestamp := nowTimestamp()
-	userBlock := makeBlock("user", request.Query, len(state.Blocks)+1, timestamp)
-	assistantReply, err := s.generateReply(ctx, request.Query, request.PageName, request.OnPageContext)
-	if err != nil {
-		return ChatResponse{}, err
-	}
-	assistantBlock := makeBlock("assistant", assistantReply, len(state.Blocks)+2, timestamp)
 	blocks := state.Blocks
 	if request.InsertIndex != nil {
 		index := *request.InsertIndex
@@ -362,12 +419,14 @@ func (s *Service) continueRun(ctx context.Context, request chatRequest) (ChatRes
 			blocks = append([]MemoryBlock{}, blocks[:index]...)
 		}
 	}
-	blocks = append(blocks, userBlock, assistantBlock)
+	blocks = append(blocks, makeBlock("user", request.Query, len(blocks)+1, timestamp))
 	state.Blocks = blocks
-	state.Status = "completed"
+	state.Status = db.RunStatusProcessing
+	state.FailureReason = nil
 	state.UpdatedAt = timestamp
 	state.RunID = record.ID
 	record.LastTriggeredAt = timestamp
+	record.Status = state.Status
 	record.StateJSON, err = json.Marshal(state)
 	if err != nil {
 		return ChatResponse{}, fmt.Errorf("marshal continued explorer state: %w", err)
@@ -375,14 +434,130 @@ func (s *Service) continueRun(ctx context.Context, request chatRequest) (ChatRes
 	if err := s.store.UpdateExplorerRun(ctx, *record); err != nil {
 		return ChatResponse{}, err
 	}
-	return ChatResponse{
-		RunID:                record.ID,
-		HasExplorerIndex:     true,
-		HasOrgProjectContext: true,
-	}, nil
+	s.dispatch(record.ID, request.OrganizationID, request.Query, request.PageName, request.OnPageContext)
+	return s.chatResponse(ctx, request.OrganizationID, record.ID), nil
 }
 
-func (s *Service) generateReply(ctx context.Context, query string, pageName, onPageContext *string) (string, error) {
+// dispatch starts the background reply generation for a run.
+func (s *Service) dispatch(runID, organizationID int64, query string, pageName, onPageContext *string) {
+	if s.runs == nil {
+		// Without a run manager the task still runs, but off the caller's
+		// goroutine: dispatch can be reached while the caller holds the state
+		// lock, which the task itself takes.
+		task := &chatTask{service: s, runID: runID, organizationID: organizationID, query: query, pageName: pageName, onPageContext: onPageContext}
+		go func() { _ = task.Run(context.Background()) }()
+		return
+	}
+	s.runs.Start(fmt.Sprintf("explorer:%d", runID), &chatTask{
+		service:        s,
+		runID:          runID,
+		organizationID: organizationID,
+		query:          query,
+		pageName:       pageName,
+		onPageContext:  onPageContext,
+	})
+}
+
+// chatResponse reports the run id plus which contexts the answer used.
+func (s *Service) chatResponse(ctx context.Context, organizationID, runID int64) ChatResponse {
+	hasIndex := false
+	if s.codeIndex != nil {
+		hasIndex, _ = s.codeIndex.HasOrgIndex(ctx, organizationID)
+	}
+	// faux-seer keeps a single index per organization, so repository knowledge
+	// and project knowledge share one flag.
+	return ChatResponse{RunID: runID, HasExplorerIndex: hasIndex, HasOrgProjectContext: hasIndex}
+}
+
+// chatTask generates the assistant reply for one chat turn.
+type chatTask struct {
+	service        *Service
+	runID          int64
+	organizationID int64
+	query          string
+	pageName       *string
+	onPageContext  *string
+}
+
+// Run generates the reply and appends it to the run, or records the failure.
+func (t *chatTask) Run(ctx context.Context) error {
+	reply, err := t.service.generateReply(ctx, t.query, t.organizationID, t.pageName, t.onPageContext)
+	if err != nil {
+		return t.service.failRun(ctx, t.runID, err)
+	}
+	return t.service.completeRun(ctx, t.runID, reply)
+}
+
+// completeRun appends the assistant block and marks the run completed.
+func (s *Service) completeRun(ctx context.Context, runID int64, reply string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, err := s.store.GetExplorerRun(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if record == nil {
+		return fmt.Errorf("explorer run %d not found", runID)
+	}
+	state, err := decodeRunState(record.StateJSON)
+	if err != nil {
+		return err
+	}
+	timestamp := nowTimestamp()
+	state.Blocks = append(state.Blocks, makeBlock("assistant", reply, len(state.Blocks)+1, timestamp))
+	state.Status = db.RunStatusCompleted
+	state.FailureReason = nil
+	state.UpdatedAt = timestamp
+	state.RunID = record.ID
+	record.Status = state.Status
+	record.LastTriggeredAt = timestamp
+	record.StateJSON, err = json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("marshal completed explorer state: %w", err)
+	}
+	return s.store.UpdateExplorerRun(ctx, *record)
+}
+
+// failRun marks a run as failed. A cancelled context means the process is
+// shutting down, which is reported as "shutdown"; the state write itself uses a
+// live context because the run context may already be cancelled.
+func (s *Service) failRun(ctx context.Context, runID int64, cause error) error {
+	message := cause.Error()
+	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
+		message = "shutdown"
+	}
+	writeCtx := context.WithoutCancel(ctx)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, err := s.store.GetExplorerRun(writeCtx, runID)
+	if err != nil {
+		return err
+	}
+	if record == nil {
+		return cause
+	}
+	state, err := decodeRunState(record.StateJSON)
+	if err != nil {
+		return err
+	}
+	state.Status = db.RunStatusError
+	state.FailureReason = &message
+	state.UpdatedAt = nowTimestamp()
+	record.Status = state.Status
+	record.LastTriggeredAt = state.UpdatedAt
+	record.StateJSON, err = json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("marshal failed explorer state: %w", err)
+	}
+	if err := s.store.UpdateExplorerRun(writeCtx, *record); err != nil {
+		return err
+	}
+	return cause
+}
+
+// generateReply answers one explorer turn, grounding the answer in indexed
+// repository code when the question looks code-related.
+func (s *Service) generateReply(ctx context.Context, query string, organizationID int64, pageName, onPageContext *string) (string, error) {
 	var prompt strings.Builder
 	prompt.WriteString(strings.TrimSpace(query))
 	if pageName != nil && strings.TrimSpace(*pageName) != "" {
@@ -393,8 +568,9 @@ func (s *Service) generateReply(ctx context.Context, query string, pageName, onP
 		prompt.WriteString("\n\nOn-page context:\n")
 		prompt.WriteString(strings.TrimSpace(*onPageContext))
 	}
+	prompt.WriteString(s.codeContext(ctx, query, organizationID))
 	response, err := s.llm.Complete(ctx, llm.CompletionRequest{
-		SystemPrompt: "You are faux-seer, a compatibility-focused Sentry Explorer assistant. Answer directly using the supplied page context when it helps, and acknowledge uncertainty when context is incomplete.",
+		SystemPrompt: "You are faux-seer, a Sentry Explorer assistant. Answer directly using the supplied page context and repository code when it helps, and acknowledge uncertainty when context is incomplete.",
 		UserPrompt:   prompt.String(),
 		Temperature:  0.2,
 		MaxTokens:    600,
@@ -403,6 +579,46 @@ func (s *Service) generateReply(ctx context.Context, query string, pageName, onP
 		return "", fmt.Errorf("generate explorer response: %w", err)
 	}
 	return strings.TrimSpace(response), nil
+}
+
+// codeExtensionPattern matches a source file reference such as "service.go".
+var codeExtensionPattern = regexp.MustCompile(`\b[\w./-]+\.(go|py|ts|tsx|js|jsx|rb|java|kt|rs|c|h|cc|cpp|cs|php|swift|scala|sql|sh|yml|yaml)\b`)
+
+// codeKeywords are the words that mark a question as being about source code.
+var codeKeywords = []string{"function", "class", "method", "implement", "stacktrace", "stack trace", "traceback", "symbol", "repository", "repo ", "code", "file", "module", "package", "exception"}
+
+// codeContext retrieves repository chunks for a code-related question. It never
+// fails the reply: an unavailable or empty index simply adds no context.
+func (s *Service) codeContext(ctx context.Context, query string, organizationID int64) string {
+	if s.codeIndex == nil || organizationID == 0 || !looksLikeCodeQuery(query) {
+		return ""
+	}
+	results, err := s.codeIndex.Search(ctx, query, codeindex.SearchOptions{OrganizationID: organizationID, K: 4})
+	if err != nil || len(results) == 0 {
+		return ""
+	}
+	var builder strings.Builder
+	builder.WriteString("\n\nRelevant repository code:\n")
+	for _, result := range results {
+		builder.WriteString(fmt.Sprintf("\n%s:%d-%d (%s/%s@%s)\n", result.Path, result.StartLine, result.EndLine, result.Owner, result.Name, result.Ref))
+		builder.WriteString(strings.TrimSpace(result.Text))
+		builder.WriteString("\n")
+	}
+	return builder.String()
+}
+
+// looksLikeCodeQuery reports whether a question references source code.
+func looksLikeCodeQuery(query string) bool {
+	lowered := strings.ToLower(query)
+	if codeExtensionPattern.MatchString(lowered) {
+		return true
+	}
+	for _, keyword := range codeKeywords {
+		if strings.Contains(lowered, keyword) {
+			return true
+		}
+	}
+	return false
 }
 
 func decodeRunState(raw []byte) (RunState, error) {

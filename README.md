@@ -167,7 +167,7 @@ See `docs/status.md` for the current implementation status, known gaps, and reco
 
 ## Configuration
 
-The repo targets Go `1.26.x`.
+The repo targets the Go version declared in `go.mod` (`go 1.27` at the time of writing).
 
 Core environment variables:
 
@@ -183,6 +183,17 @@ Core environment variables:
 | `SIMILARITY_THRESHOLD` | Default nearest-neighbor threshold |
 | `LLM_MODEL` | Comma-separated model list, rotated round-robin per request |
 | `EMBEDDING_MODEL` | Comma-separated model list, rotated round-robin per request |
+| `GITHUB_TOKEN` | GitHub personal-access token; when set, explorer repos, org-repo indexing, codegen, and delegated-agent-match become real |
+| `GITHUB_BASE_URL` | GitHub API base URL, default `https://api.github.com` |
+| `GITLAB_TOKEN` | GitLab token (provider not yet implemented; endpoints fall back to simulated) |
+| `GITLAB_BASE_URL` | GitLab API base URL, default `https://gitlab.com/api/v4` |
+| `GITEA_TOKEN` | Gitea token (provider not yet implemented) |
+| `GITEA_BASE_URL` | Gitea API base URL |
+| `BITBUCKET_TOKEN` | Bitbucket token (provider not yet implemented) |
+| `BITBUCKET_BASE_URL` | Bitbucket API base URL, default `https://api.bitbucket.org/2.0` |
+| `GCP_SERVICE_ACCOUNT_JSON` | Inline JSON or filesystem path to a GCP service-account key; when set, GCP verification becomes real |
+| `CODE_INDEX_CHUNK_SIZE` | Maximum runes per indexed code chunk, default `1000` |
+| `CODE_INDEX_CHUNK_OVERLAP` | Overlap between consecutive chunks, default `200` |
 
 ## LLM and embedding providers
 
@@ -283,6 +294,39 @@ VECTOR_DIMENSIONS=1536
 
 Important: autofix and explorer run state still live in SQLite even when `pgvector` is enabled.
 
+## What is real versus simulated
+
+Most endpoints now perform real work when the right credentials are configured. A few remain simulated because their dependencies are internal to Seer or require infrastructure not available externally.
+
+**Real when configured:**
+
+- **Explorer chat** creates an async run, calls the LLM, and persists the reply. The code index augments replies with repository chunks when a repository provider and embedding client are available.
+- **Explorer repos** lists stored repository preferences or the configured provider's repositories.
+- **Explorer index/org-repo-knowledge** fetches, chunks, embeds, and stores repository code in the vector backend.
+- **Summarize/trace**, **summarize/fixability**, and all **feedback/* endpoints** call the LLM.
+- **Replay breadcrumbs start/state/delete** persist and LLM-summarize via SQLite.
+- **Severity score** calls the LLM and falls back to a deterministic heuristic on failure.
+- **LLM generate** and **oneshot/run** call the LLM.
+- **Investigations** create/command/get are persisted runs with an LLM-backed workflow step.
+- **Assisted query start/translate/translate-agentic** call the LLM, grounded in code-index context when available.
+- **Codegen unit-tests** fetches the PR diff and calls the LLM when a repository provider is configured.
+- **Autofix coding-agent state** lazy-creates runs on demand and advances the agent via a background LLM call.
+- **Agent feature/run** creates a persisted run and calls the LLM.
+- **Offboarding/repository** drops the repository's code index.
+- **PR metrics/delegated-agent-match** looks up autofix runs by provider+PR or PR URL and returns 200 only on a match.
+- **Project preference** endpoints persist and query per-organization repository removals.
+- **GCP verify-connection** performs real service-account JWT verification when `GCP_SERVICE_ACCOUNT_JSON` is set.
+
+**Still simulated (by design):**
+
+- `explorer/index`, `explorer/index/org-project-knowledge`, `explorer/index/sentry-knowledge`, `explorer/export-indexes`, `explorer/service-map/update` — the request carries no repository identity or the target is internal to Seer.
+- `issue-detection/analyze` (202 ack) and `issue-detection/check-budget` — no event-processing pipeline.
+- `anomaly-detection/*`, `workflows/compare/cohort`, `trends/breakpoint-detector` — require a timeseries backend.
+- `code_review/*`, `pr-metrics/pr-close-judge` — out of scope or callback-only.
+- `supergroups/cluster-lightweight` — requires a grouping model.
+- `assisted-query/create-cache` — internal prompt-caching optimization.
+- `monitoring-providers/gcp/verify-connection` — simulated when `GCP_SERVICE_ACCOUNT_JSON` is unset.
+
 ## Sentry observability
 
 `faux-seer` can report its own errors and performance to Sentry using `sentry-go`.
@@ -316,11 +360,12 @@ Startup, generic errors, and these access records are the only log lines the ser
 
 Compared with real Seer:
 
-- autofix persists coding-agent state snapshots rather than running Seer's full agent loop
-- explorer indexing, repo, and agent feature-run endpoints are acknowledgement stubs
-- summaries and severity are heuristic or provider-assisted, not model-parity implementations
-- app state stays on SQLite even when `pgvector` is enabled
-- several Seer-only behaviors remain intentionally unimplemented
+- Only GitHub is implemented as a repository provider; GitLab, Gitea, and Bitbucket are recognised but not implemented (endpoints fall back to simulated responses).
+- Autofix advances the coding agent with a single LLM call per state-set rather than Seer's multi-turn tool-use loop.
+- Explorer chat replies are grounded in code-index chunks when available, but there is no interactive exploration or tool-use loop.
+- Explorer index/org-project-knowledge, index/sentry-knowledge, export-indexes, and service-map/update remain simulated because their targets are internal to Seer.
+- App state stays on SQLite even when `pgvector` is enabled.
+- Several Seer-only behaviors (anomaly detection, breakpoint detection, cohort comparison, code review, issue detection) remain intentionally simulated.
 
 ## Building from source
 

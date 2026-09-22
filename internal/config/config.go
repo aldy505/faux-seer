@@ -35,6 +35,20 @@ type Config struct {
 	VectorDimensions     int
 	SimilarityThreshold  float64
 	HTTPReferer          string
+
+	GitHubToken      string
+	GitHubBaseURL    string
+	GitLabToken      string
+	GitLabBaseURL    string
+	GiteaToken       string
+	GiteaBaseURL     string
+	BitbucketToken   string
+	BitbucketBaseURL string
+
+	GCPServiceAccountJSON string
+
+	CodeIndexChunkSize    int
+	CodeIndexChunkOverlap int
 }
 
 // Load reads environment variables and returns validated configuration.
@@ -56,6 +70,16 @@ func Load() (*Config, error) {
 		VectorStoreDSN:    strings.TrimSpace(os.Getenv("VECTOR_STORE_DSN")),
 		HTTPReferer:       strings.TrimSpace(os.Getenv("HTTP_REFERER")),
 		SharedSecrets:     splitSecrets(firstNonEmpty(os.Getenv("SEER_SHARED_SECRET"), os.Getenv("SEER_RPC_SHARED_SECRET"), os.Getenv("SEER_API_SHARED_SECRET"), os.Getenv("SHARED_SECRET"))),
+
+		GitHubToken:           strings.TrimSpace(os.Getenv("GITHUB_TOKEN")),
+		GitHubBaseURL:         envDefault("GITHUB_BASE_URL", "https://api.github.com"),
+		GitLabToken:           strings.TrimSpace(os.Getenv("GITLAB_TOKEN")),
+		GitLabBaseURL:         envDefault("GITLAB_BASE_URL", "https://gitlab.com/api/v4"),
+		GiteaToken:            strings.TrimSpace(os.Getenv("GITEA_TOKEN")),
+		GiteaBaseURL:          strings.TrimSpace(os.Getenv("GITEA_BASE_URL")),
+		BitbucketToken:        strings.TrimSpace(os.Getenv("BITBUCKET_TOKEN")),
+		BitbucketBaseURL:      envDefault("BITBUCKET_BASE_URL", "https://api.bitbucket.org/2.0"),
+		GCPServiceAccountJSON: strings.TrimSpace(os.Getenv("GCP_SERVICE_ACCOUNT_JSON")),
 	}
 
 	var errs []string
@@ -67,6 +91,18 @@ func Load() (*Config, error) {
 	cfg.EmbeddingDimensions = intDefault("EMBEDDING_DIMENSIONS", 256, &errs)
 	cfg.VectorDimensions = intDefault("VECTOR_DIMENSIONS", cfg.EmbeddingDimensions, &errs)
 	cfg.SimilarityThreshold = floatDefault("SIMILARITY_THRESHOLD", 0.1, &errs)
+	cfg.CodeIndexChunkSize = intDefault("CODE_INDEX_CHUNK_SIZE", 1000, &errs)
+	cfg.CodeIndexChunkOverlap = intDefault("CODE_INDEX_CHUNK_OVERLAP", 200, &errs)
+
+	if cfg.CodeIndexChunkSize <= 0 {
+		errs = append(errs, "CODE_INDEX_CHUNK_SIZE must be greater than zero")
+	}
+	if cfg.CodeIndexChunkOverlap < 0 || cfg.CodeIndexChunkOverlap >= cfg.CodeIndexChunkSize {
+		errs = append(errs, "CODE_INDEX_CHUNK_OVERLAP must be zero or greater and smaller than CODE_INDEX_CHUNK_SIZE")
+	}
+	if cfg.GiteaToken != "" && cfg.GiteaBaseURL == "" {
+		errs = append(errs, "GITEA_BASE_URL is required when GITEA_TOKEN is set")
+	}
 
 	if cfg.VectorStore != "sqlitevec" && cfg.VectorStore != "pgvector" {
 		errs = append(errs, "VECTOR_STORE must be one of sqlitevec or pgvector")

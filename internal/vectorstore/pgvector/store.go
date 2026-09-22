@@ -70,6 +70,23 @@ artifact_json JSONB NOT NULL,
 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 )`,
 		`CREATE INDEX IF NOT EXISTS idx_supergroups_org_project ON supergroups(organization_id, project_id)`,
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS code_chunks (
+			organization_id BIGINT NOT NULL,
+			provider TEXT NOT NULL,
+			owner TEXT NOT NULL,
+			name TEXT NOT NULL,
+			ref TEXT NOT NULL,
+			path TEXT NOT NULL,
+			chunk_index INTEGER NOT NULL,
+			start_line INTEGER NOT NULL,
+			end_line INTEGER NOT NULL,
+			text TEXT NOT NULL,
+			vector vector(%d) NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (organization_id, provider, owner, name, ref, path, chunk_index)
+		)`, s.dimensions),
+		`CREATE INDEX IF NOT EXISTS idx_code_chunks_org ON code_chunks(organization_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_code_chunks_repo ON code_chunks(provider, owner, name)`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
@@ -204,6 +221,117 @@ func (s *Store) ListSupergroups(ctx context.Context, organizationID int64, proje
 		out = append(out, item)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) UpsertCodeChunks(ctx context.Context, chunks []vectorstore.CodeChunk) error {
+	if len(chunks) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin pgvector code chunk tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.PrepareContext(ctx, `
+INSERT INTO code_chunks (
+	organization_id, provider, owner, name, ref, path, chunk_index, start_line, end_line, text, vector, created_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+ON CONFLICT (organization_id, provider, owner, name, ref, path, chunk_index)
+DO UPDATE SET
+	start_line = EXCLUDED.start_line,
+	end_line = EXCLUDED.end_line,
+	text = EXCLUDED.text,
+	vector = EXCLUDED.vector
+`)
+	if err != nil {
+		return fmt.Errorf("prepare pgvector code chunk upsert: %w", err)
+	}
+	defer stmt.Close()
+	for _, chunk := range chunks {
+		if _, err := stmt.ExecContext(
+			ctx,
+			chunk.OrganizationID,
+			chunk.Provider,
+			chunk.Owner,
+			chunk.Name,
+			chunk.Ref,
+			chunk.Path,
+			chunk.ChunkIndex,
+			chunk.StartLine,
+			chunk.EndLine,
+			chunk.Text,
+			pgvector.NewVector(chunk.Vector),
+			time.Now().UTC(),
+		); err != nil {
+			return fmt.Errorf("exec pgvector code chunk upsert: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit pgvector code chunk tx: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) SearchCode(ctx context.Context, vector []float32, k int, filters vectorstore.CodeFilters) ([]vectorstore.CodeResult, error) {
+	if k <= 0 {
+		k = 10
+	}
+	conditions := []string{"organization_id = $2"}
+	args := []any{pgvector.NewVector(vector), filters.OrganizationID}
+	for _, filter := range []struct {
+		value  string
+		column string
+	}{
+		{filters.Provider, "provider"},
+		{filters.Owner, "owner"},
+		{filters.Name, "name"},
+		{filters.Ref, "ref"},
+	} {
+		if filter.value == "" {
+			continue
+		}
+		args = append(args, filter.value)
+		conditions = append(conditions, fmt.Sprintf("%s = $%d", filter.column, len(args)))
+	}
+	args = append(args, k)
+	query := fmt.Sprintf(`
+SELECT provider, owner, name, ref, path, chunk_index, start_line, end_line, text, vector <=> $1 AS distance
+FROM code_chunks
+WHERE %s
+ORDER BY distance ASC
+LIMIT $%d
+`, strings.Join(conditions, " AND "), len(args))
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query pgvector code chunks: %w", err)
+	}
+	defer rows.Close()
+	results := make([]vectorstore.CodeResult, 0, k)
+	for rows.Next() {
+		var item vectorstore.CodeResult
+		if err := rows.Scan(&item.Provider, &item.Owner, &item.Name, &item.Ref, &item.Path, &item.ChunkIndex, &item.StartLine, &item.EndLine, &item.Text, &item.Distance); err != nil {
+			return nil, fmt.Errorf("scan pgvector code chunk: %w", err)
+		}
+		results = append(results, item)
+	}
+	return results, rows.Err()
+}
+
+func (s *Store) DeleteCodeRepo(ctx context.Context, organizationID int64, provider, owner, name string) (bool, error) {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM code_chunks WHERE organization_id = $1 AND provider = $2 AND owner = $3 AND name = $4`, organizationID, provider, owner, name); err != nil {
+		return false, fmt.Errorf("delete pgvector code chunks: %w", err)
+	}
+	return true, nil
+}
+
+func (s *Store) HasCodeChunks(ctx context.Context, organizationID int64) (bool, error) {
+	var exists bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM code_chunks WHERE organization_id = $1)`, organizationID).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check pgvector code chunks: %w", err)
+	}
+	return exists, nil
 }
 
 func compact(sql string) string {

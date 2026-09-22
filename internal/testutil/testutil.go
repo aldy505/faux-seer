@@ -68,10 +68,15 @@ type MockVectorStore struct {
 	DeleteHashesFunc          func(context.Context, int64, []string) (bool, error)
 	InsertSupergroupFunc      func(context.Context, vectorstore.SupergroupRecord) error
 	ListSupergroupsFunc       func(context.Context, int64, []int64, int, int) ([]map[string]any, error)
+	UpsertCodeChunksFunc      func(context.Context, []vectorstore.CodeChunk) error
+	SearchCodeFunc            func(context.Context, []float32, int, vectorstore.CodeFilters) ([]vectorstore.CodeResult, error)
+	DeleteCodeRepoFunc        func(context.Context, int64, string, string, string) (bool, error)
+	HasCodeChunksFunc         func(context.Context, int64) (bool, error)
 
 	GroupingRecords []vectorstore.GroupingRecord
 	SearchCalls     []SearchCall
 	Supergroups     []vectorstore.SupergroupRecord
+	CodeChunks      []vectorstore.CodeChunk
 	mu              sync.Mutex
 }
 
@@ -208,3 +213,91 @@ func (m *MockVectorStore) ListSupergroups(ctx context.Context, organizationID in
 }
 
 var _ vectorstore.Store = (*MockVectorStore)(nil)
+
+// UpsertCodeChunks stores indexed code chunks in memory unless overridden.
+func (m *MockVectorStore) UpsertCodeChunks(ctx context.Context, chunks []vectorstore.CodeChunk) error {
+	if m.UpsertCodeChunksFunc != nil {
+		return m.UpsertCodeChunksFunc(ctx, chunks)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.CodeChunks = append(m.CodeChunks, chunks...)
+	return nil
+}
+
+// SearchCode returns the stored chunks matching the filters unless overridden.
+// It performs no ranking: tests that care about ordering set SearchCodeFunc.
+func (m *MockVectorStore) SearchCode(ctx context.Context, _ []float32, k int, filters vectorstore.CodeFilters) ([]vectorstore.CodeResult, error) {
+	if m.SearchCodeFunc != nil {
+		return m.SearchCodeFunc(ctx, nil, k, filters)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	results := make([]vectorstore.CodeResult, 0, len(m.CodeChunks))
+	for _, chunk := range m.CodeChunks {
+		if chunk.OrganizationID != filters.OrganizationID {
+			continue
+		}
+		if filters.Provider != "" && chunk.Provider != filters.Provider {
+			continue
+		}
+		if filters.Owner != "" && chunk.Owner != filters.Owner {
+			continue
+		}
+		if filters.Name != "" && chunk.Name != filters.Name {
+			continue
+		}
+		if filters.Ref != "" && chunk.Ref != filters.Ref {
+			continue
+		}
+		results = append(results, vectorstore.CodeResult{
+			Provider:   chunk.Provider,
+			Owner:      chunk.Owner,
+			Name:       chunk.Name,
+			Ref:        chunk.Ref,
+			Path:       chunk.Path,
+			ChunkIndex: chunk.ChunkIndex,
+			StartLine:  chunk.StartLine,
+			EndLine:    chunk.EndLine,
+			Text:       chunk.Text,
+		})
+		if k > 0 && len(results) == k {
+			break
+		}
+	}
+	return results, nil
+}
+
+// DeleteCodeRepo removes an organization's stored chunks for a repository
+// unless overridden.
+func (m *MockVectorStore) DeleteCodeRepo(ctx context.Context, organizationID int64, provider, owner, name string) (bool, error) {
+	if m.DeleteCodeRepoFunc != nil {
+		return m.DeleteCodeRepoFunc(ctx, organizationID, provider, owner, name)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	filtered := m.CodeChunks[:0]
+	for _, chunk := range m.CodeChunks {
+		if chunk.OrganizationID == organizationID && chunk.Provider == provider && chunk.Owner == owner && chunk.Name == name {
+			continue
+		}
+		filtered = append(filtered, chunk)
+	}
+	m.CodeChunks = filtered
+	return true, nil
+}
+
+// HasCodeChunks reports whether any chunk is stored for the organization.
+func (m *MockVectorStore) HasCodeChunks(ctx context.Context, organizationID int64) (bool, error) {
+	if m.HasCodeChunksFunc != nil {
+		return m.HasCodeChunksFunc(ctx, organizationID)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, chunk := range m.CodeChunks {
+		if chunk.OrganizationID == organizationID {
+			return true, nil
+		}
+	}
+	return false, nil
+}

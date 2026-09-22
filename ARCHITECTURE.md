@@ -53,27 +53,26 @@ All protected endpoints pass through a shared auth wrapper in `internal/handler/
 
 ### Autofix lifecycle
 
-Autofix runs themselves are orchestrated by Seer in a real deployment; faux-seer only
-persists the coding-agent state snapshots Sentry reports for a run:
+Autofix persists coding-agent state snapshots and advances the agent via a background LLM call:
 
-1. `POST /v1/automation/autofix/coding-agent/state/set` replaces the run's coding-agent map
-2. `POST /v1/automation/autofix/coding-agent/state/update` merges an update into one agent entry
+1. `POST /v1/automation/autofix/coding-agent/state/set` replaces the run's coding-agent map. When the run does not yet exist, the service creates it on demand with the caller-supplied id (`CreateAutofixRunWithID`), because Sentry reports state for runs Seer already created.
+2. `POST /v1/automation/autofix/coding-agent/state/update` merges an update into one agent entry, locating the run by scanning all persisted runs for the agent id.
+3. After persisting state, the service kicks off a background `agentAdvancementTask` via the run manager. The task reads the stored coding-agent state, calls the LLM once to advance the agent, and persists the updated state.
+4. On process shutdown the run manager cancels the root context; the advancement task detects cancellation, persists `status: "error"` with `failure_reason: "shutdown"`, and returns.
 
-Both endpoints look the run up in SQLite and return `{"run_id": <id>, "status": "success"}`.
-A run id or agent id that is unknown yields `status: "error"` with a message instead of an error
-status code.
+A run id that is unknown when state arrives is lazily created; an agent id that is unknown returns `status: "error"` with a message.
 
 ### Explorer lifecycle
 
-1. `chat` starts or continues a run, calls the configured LLM client, and stores the block history
-2. `state` and `state/pr` return the stored run state
+1. `chat` validates the request, creates an `ExplorerRunRecord` holding the user block with `status: "processing"`, persists it, and dispatches a background `chatTask` via the run manager. The task builds a prompt from `query`, `page_name`, and `on_page_context`. When the code index has entries for the organization and the query looks code-related (file extensions, function names, stack frames), the task calls `codeindex.Search` and appends the top chunks to the prompt. It then calls the LLM, appends user and assistant blocks, and sets `status: "completed"` (or `status: "error"` with `failure_reason: "shutdown"` on cancellation). The HTTP response returns immediately with `run_id`, `has_explorer_index`, and `has_org_project_context`.
+2. `state` and `state/pr` return the stored run state including `status`, `blocks[]`, and `failure_reason` when present. The run status is one of Sentry's literals: `"processing"`, `"completed"`, `"error"`, or `"awaiting_user_input"`.
 3. `runs/by-ids` returns live run summaries keyed by run id so Sentry can batch-poll statuses
 4. `update` mutates run state for interrupts, user input responses, and created PRs
-5. `repos`, `index`, `index/*`, and `export-indexes` are acknowledgement stubs because faux-seer
-   stores no search index or repository selection
+5. `repos` returns stored repository preferences for the organization when they exist, or the configured repository provider's repositories via `Provider.ListRepos`. Without a configured provider, the empty list is the simulated answer.
+6. `index/org-repo-knowledge` fetches, chunks, embeds, and stores repository code via `codeindex.IndexRepo` in the background. It skips repositories the org has removed via project preferences.
+7. `index` (generic), `index/org-project-knowledge`, `index/sentry-knowledge`, `export-indexes`, and `service-map/update` are simulated because their requests carry no repository identity or target Seer-internal infrastructure.
 
-`POST /v1/automation/agent/feature/run` is likewise an acknowledgement stub; it returns a synthetic
-`run_id` because Sentry's outbox only requires a non-null run id in the response.
+`POST /v1/automation/agent/feature/run` creates a persisted run via `runs.Service.Start`, calls the LLM for a short result, and returns the run id. Retried requests with the same `ExternalIdempotencyKey` reuse the existing run.
 
 ### Similarity lifecycle
 
@@ -89,26 +88,30 @@ status code.
 
 ### Summary and severity lifecycle
 
-- issue summaries can call the configured LLM client for short compatibility text
-- fixability is a heuristic response
-- severity is currently deterministic and heuristic, clamped to `[0,1]`
+- `summarize/issue` calls the LLM and returns structured headline, whats_wrong, trace, possible_cause, and scores
+- `summarize/trace` calls the LLM with trace context and returns summary, key_observations, performance_characteristics, and suggested_investigations; falls back to a deterministic heuristic on failure
+- `summarize/fixability` calls the LLM and returns a fixability assessment with the same shape as issue summaries
+- `severity-score` calls the LLM for a severity JSON `{"severity": 0.0..1.0}` and falls back to the deterministic token/heuristic scoring when the LLM fails, so the endpoint never 500s
 
 ### Feedback and replay summary lifecycle
 
-- feedback spam-detection, labels, title, label-groups, and summarize return deterministic or
-  derived responses; no LLM call is made
-- replay breadcrumbs start, state, and delete are frontend-facing; start creates a session and
-  returns a completed status immediately, state is polled by the frontend, and delete is a
-  status-only consumer
+- `feedback/spam-detection` calls the LLM with a boolean classification prompt and returns `{"is_spam": bool}`
+- `feedback/labels` calls the LLM to produce a JSON array of category labels
+- `feedback/title` calls the LLM to produce a title; falls back to the deterministic `DeriveFeedbackTitle` heuristic when the LLM returns empty
+- `feedback/label-groups` calls the LLM to group labels with associated labels; returns one entry per requested label
+- `feedback/summarize` calls the LLM to summarize a list of feedback messages
+- All feedback handlers return HTTP 400 for both malformed requests and LLM failures
+- `replay/breadcrumbs/start` validates the request, upserts a `replay_breadcrumb_summaries` row with `status: "processing"`, calls the LLM with a synthesized breadcrumb narrative, stores the summary, and returns it with `status: "completed"`
+- `replay/breadcrumbs/state` reads the stored row and returns the same shape; when no summary exists for the replay_id, returns `status: "not_started"`
+- `replay/breadcrumbs/delete` removes stored rows and returns `{"success": true}`
 
 ### Investigation lifecycle
 
-- `investigations` (POST) creates a run and returns a synthetic `runId` with an empty projection
-- `investigations/{run_id}/commands` accepts a workflow command and returns `accepted: true` with
-  the echoed or generated `requestId` UUID
-- `investigations/{run_id}` (GET) returns the current run state
+- `investigations` (POST) creates a persisted run via `runs.Service.Start` with an idempotency key derived from `requestId`. The background task calls the LLM with an investigation prompt and merges the answer into the run projection. Returns `{"runId": <id>, "created": true, "projection": {}}`.
+- `investigations/{run_id}/commands` validates `requestId` and `expectedWorkflowVersion`, records the command via `AcceptCommand` (deduplicating by request id), increments the workflow version, and returns the accepted command with the updated version. A repeated `requestId` is reported as `duplicate: true`.
+- `investigations/{run_id}` (GET) reads the persisted run and returns the projection, which contains the run summary plus the most recent accepted command.
 
-All three are stubs; faux-seer stores no investigation state between calls.
+All three are persisted in the `runs` and `run_commands` SQLite tables.
 
 ### Issue detection lifecycle
 
@@ -119,13 +122,11 @@ All three are stubs; faux-seer stores no investigation state between calls.
 
 ### Assisted query lifecycle
 
-- `assisted-query/start` returns a synthetic `run_id`
-- `assisted-query/state` returns a completed session with empty steps
-- `assisted-query/translate` and `translate-agentic` return empty responses with no unsupported
-  reason
-- `assisted-query/create-cache` is a status-only consumer
-
-All are stubs; faux-seer performs no query translation or caching.
+- `assisted-query/start` creates a persisted run via `runs.Service.Start` and dispatches a background `answerTask` that calls the LLM, grounded in code-index context when the organization has an index. Returns `{"run_id": <id>}`.
+- `assisted-query/state` reads the persisted run and returns the session with `status`, `current_step`, `completed_steps`, and `final_response`.
+- `assisted-query/translate` calls the LLM with the natural-language question and parses the model's JSON response into a list of `Query` objects (each with `query`, `stats_period`, `sort`, `group_by`, `visualization`, and `mode`). Code-index context is included when available.
+- `assisted-query/translate-agentic` uses the same translation logic as `translate`.
+- `assisted-query/create-cache` is a simulated ack; prompt caching is an internal Seer optimization.
 
 ### Anomaly detection, breakpoints, and workflow lifecycle
 
@@ -140,26 +141,62 @@ response parsing.
 
 ### Code review, offboarding, and PR metrics lifecycle
 
-- `code_review/check/rerun`, `review-request`, and `pr-closed` are status-only consumers
-- `offboarding/repository` is a status-only consumer
-- `pr-metrics/delegated-agent-match` returns HTTP 202 ("no synchronous match")
-- `pr-metrics/pr-close-judge` is a status-only consumer; the verdict arrives later via callback
+- `code_review/check/rerun`, `review-request`, and `pr-closed` are simulated acks; a full code-review agent is out of scope
+- `offboarding/repository` parses the request for `provider`, `repository_owner`, and `repository_name`, then calls `codeindex.DeleteRepo` to drop stale chunks. Always returns `{"success": true}`.
+- `pr-metrics/delegated-agent-match` looks up the autofix run by provider+PR pair or by PR URL substring in the state blob. On a match it returns HTTP 200 with `run_id`, `agent_id`, `signal_type`, and `match_path`. On no match it returns HTTP 202.
+- `pr-metrics/pr-close-judge` is a simulated ack; the actual verdict arrives later via Sentry's callback path
 
 ### Models and monitoring provider lifecycle
 
-- `GET /v1/models` reads the configured `LLM_MODEL` list from config and returns it; Sentry
-  caches it for 10 minutes
-- `POST /v1/llm/generate` is a stub that returns empty content and model; consumers parse content
-  as JSON and handle failure
-- `POST /v1/monitoring-providers/gcp/verify-connection` is simulated; it returns
-  `"connected"` for every project without performing real GCP verification
+- `GET /v1/models` reads the configured `LLM_MODEL` list from config and returns it; Sentry caches it for 10 minutes
+- `POST /v1/llm/generate` calls the LLM with the request's `system_prompt`, `prompt`, `temperature`, and `max_tokens` and returns `{"content": text, "model": model}`. Consumers parse content as JSON and handle failure.
+- `POST /v1/automation/oneshot/run` calls the LLM and returns `{"result": {...}}`. The result keys vary by `oneshot_id`: `"conversation_title"` returns `{"title": ...}`, `"agent_question"` returns `{"answer": ...}`.
+- `POST /v1/monitoring-providers/gcp/verify-connection` performs real GCP project verification when `GCP_SERVICE_ACCOUNT_JSON` is configured: it loads the service account, exchanges a signed JWT for an OAuth2 access token, and checks project access via Cloud Resource Manager and Service Usage APIs. When the env var is unset, it returns `"connected"` for every project without performing real verification.
 
 ### Project preference maintenance lifecycle
 
-- `remove-repository`, `bulk-remove-repositories`, and `remove-handoffs-for-integration` are
-  acknowledgement stubs; faux-seer stores no preferences and always returns `{"success":true}`
+- All three endpoints persist per-organization repository preferences in the `project_preferences` SQLite table.
+- `remove-repository` removes the matching `{provider, external_id}` from the stored `repos_json` list and saves.
+- `bulk-remove-repositories` removes all entries matching the request's `repositories` list and saves.
+- `remove-handoffs-for-integration` clears the `integration_id` field and saves.
+- The `preferences.RemovedSet` method is consulted by explorer indexing so that a repository removed from Seer is not indexed again.
 
 ## Core abstractions
+
+### Git provider interface
+
+`internal/git/provider.go` defines:
+
+```go
+type Provider interface {
+    Name() string
+    ListRepos(ctx context.Context, org string) ([]Repo, error)
+    GetRepo(ctx context.Context, owner, name string) (Repo, error)
+    GetDefaultBranch(ctx context.Context, owner, name string) (string, error)
+    ReadTree(ctx context.Context, owner, name, ref string) ([]TreeEntry, error)
+    ReadFile(ctx context.Context, owner, name, ref, path string) ([]byte, error)
+    GetPR(ctx context.Context, owner, name string, number int) (PullRequest, error)
+    GetPRFiles(ctx context.Context, owner, name string, number int) ([]PRFile, error)
+    CreateBranch(ctx context.Context, owner, name, baseBranch, newBranch string) error
+    CreateCommit(ctx context.Context, owner, name, branch, message string, files []FileChange) (string, error)
+    OpenPR(ctx context.Context, owner, name, title, body, head, base string) (PullRequest, error)
+    PostPRReview(ctx context.Context, owner, name string, number int, body string, comments []PRReviewComment) error
+}
+```
+
+`internal/git/factory.go` `NewProvider` maps `"github"`, `"gitlab"`, `"gitea"`, `"bitbucket"` to their constructors. Only GitHub (`internal/git/github.go`) is implemented; the others return `ErrNotConfigured` so handlers fall back to simulated responses. The GitHub implementation uses stdlib `net/http` against `GITHUB_BASE_URL` with `GITHUB_TOKEN` as `Authorization: Bearer`.
+
+### Code index service
+
+`internal/codeindex/service.go` provides `IndexRepo`, `Search`, `DeleteRepo`, and `HasOrgIndex`. Indexing fetches the default branch when `ref` is empty, walks the tree via `git.Provider.ReadTree`, skips binary files (NUL byte detection) and files larger than 1 MiB, chunks text into `CODE_INDEX_CHUNK_SIZE` runes with `CODE_INDEX_CHUNK_OVERLAP` overlap, embeds chunks via `embedding.Client.EmbedTexts`, and stores them in the vector backend. `Search` embeds the query and returns top-K code chunks. The service is nil-safe: when no git provider is configured, `Indexed()` returns false and handlers fall back to simulated responses.
+
+### Run manager
+
+`internal/runmgr/runmgr.go` runs background work with process-lifetime cancellation. The `Manager` owns a `sync.Map` of in-flight `Task` goroutines and a root `context.Context` derived from the process signal context. `Start(key, task)` stores the task and spawns it in a goroutine. `Cancel(key)` stops one run. `CancelAll()` cancels the root context, which propagates to every in-flight run. `WaitContext(ctx)` blocks until all runs finish or the context expires. On `SIGINT`/`SIGTERM`, `main.go` calls `CancelAll()` before `httpServer.Shutdown`, so in-flight runs persist their terminal `"error"` / `"shutdown"` status before the process exits.
+
+### Persisted runs
+
+`internal/runs/service.go` wraps the `runs` and `run_commands` SQLite tables. `Start` persists a run and dispatches a background `Task` via the run manager. `StartWithID` does the same but uses a caller-supplied id (for autofix runs where Sentry already holds the id). `FindByIdempotencyKey` deduplicates retried requests. `AcceptCommand` records a command once per `request_id` and advances the run's `workflow_version`; a repeated `request_id` is reported as `duplicate: true`. `Complete`, `Fail`, and `UpdateProjection` persist terminal or intermediate states. `Projection` renders the stored result as the map Sentry reads from the `GET` endpoint. `CompleteText` runs a single LLM turn and returns trimmed text, used by the agent feature run and investigation background tasks.
 
 ## LLM abstraction
 
@@ -246,13 +283,19 @@ type Store interface {
 The service intentionally uses split persistence:
 
 - SQLite application DB:
-  - autofix runs
-  - explorer runs
+  - autofix runs (with `status` column and `provider`/`pr_id` for delegated-agent-match lookup)
+  - explorer runs (with `status` column)
+  - generic runs (`runs` table with `kind`, `idempotency_key`, `status`, `workflow_version`)
+  - run commands (`run_commands` table with deduplicated `request_id`)
+  - replay breadcrumb summaries (`replay_breadcrumb_summaries` table)
+  - project preferences (`project_preferences` table with `repos_json` and `integration_id`)
   - default local grouping records and supergroups
-- `pgvector` Postgres DB:
-  - grouping records
-  - similarity search
-  - supergroups when `VECTOR_STORE=pgvector`
+- Vector store backend (sqlitevec or pgvector):
+  - grouping records and similarity search
+  - supergroup artifacts
+  - code-indexed repository chunks (`sqlitevec_code_chunks` or `code_chunks`)
+
+The `status` column on `autofix_runs` and `explorer_runs` defaults to `"completed"` for older databases that predate the column. New runs use `"processing"` while background work is in flight.
 
 This split keeps local setup simple while allowing better vector search when Postgres is available.
 
@@ -292,9 +335,13 @@ When `SENTRY_DSN` is configured, faux-seer enables:
 The test suite uses the standard library plus in-memory doubles:
 
 - auth verification tests
-- HTTP handler tests for explorer, similarity, severity, and issue summary
+- HTTP handler tests for explorer (including async run lifecycle), similarity, severity, issue summary, explorer indexing, preferences, and generation
+- `internal/handler/routes_test.go` pins the exact route surface: 63 Seer paths answer, absent paths 404, and `issue-detection/analyze` returns exactly 202
 - OpenAI-compatible client and embedding client tests via `httptest.NewServer`, including model round-robin assertions
 - access-log middleware tests covering URL, headers, and body capture
-- SQLite vector store round-trip tests
+- SQLite vector store round-trip tests (grouping, code chunks, has-org-index)
+- `internal/git/` tests for the GitHub provider via `httptest.NewServer`
+- `internal/codeindex/` tests for chunking, binary detection, and index/delete
+- `internal/explorer/` tests for chat run lifecycle, code-context detection, and state persistence
 
 Support mocks live in `internal/testutil/`.

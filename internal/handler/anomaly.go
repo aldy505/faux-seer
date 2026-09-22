@@ -5,14 +5,19 @@ import (
 	"net/http"
 )
 
+// SIMULATED: faux-seer has no anomaly detection model or historical timeseries
+// data store. All four anomaly endpoints return empty/success acks so Sentry's
+// alert-rule setup flow does not fail. The consumer
+// (src/sentry/seer/anomaly_detection/get_anomaly_data.py) treats an empty
+// timeseries as "no anomalies" and proceeds normally.
+
 // anomalyDetect handles POST /v1/anomaly-detection/detect.
 //
-// Consumer: get_anomaly_data_from_seer in
-// src/sentry/seer/anomaly_detection/get_anomaly_data.py:130-170
-// reads results.get("success"), results.get("timeseries").
-// Response type: DetectAnomaliesResponse = {success: bool, timeseries: list}.
-// An empty timeseries is valid — the consumer treats it as "no anomalies" and
-// returns None, which downstream callers interpret as no anomaly to act on.
+// SIMULATED: Real anomaly detection requires a trained timeseries model and
+// historical data store, neither of which faux-seer provides. The consumer
+// (get_anomaly_data_from_seer, get_anomaly_data.py:130-170) reads
+// results.get("success"), results.get("timeseries"). An empty timeseries is
+// valid — the consumer treats it as "no anomalies" and returns None.
 func (s *Server) anomalyDetect(w http.ResponseWriter, r *http.Request, body []byte) {
 	if err := decodeOptionalJSONBody(body, new(any)); err != nil {
 		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("decode anomaly detect request: %v", err))
