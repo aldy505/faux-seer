@@ -25,7 +25,7 @@ func TestOpenAICompatClientRoundRobinsModels(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewOpenAICompatClient(server.URL, "test-key", []string{"embed-a", "embed-b"}, 2, "")
+	client := NewOpenAICompatClient(server.URL, "test-key", []string{"embed-a", "embed-b"}, 2, "", nil)
 	for i := range 3 {
 		if _, err := client.EmbedTexts(context.Background(), []string{"text"}); err != nil {
 			t.Fatalf("embed request %d: %v", i, err)

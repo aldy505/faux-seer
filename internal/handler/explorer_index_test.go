@@ -60,7 +60,7 @@ func newRepositoryBackedServer(t *testing.T) (*Server, *codeindex.Service, func(
 	}))
 	t.Cleanup(github.Close)
 
-	provider, err := git.NewGitHubProvider(github.URL, "test-token")
+	provider, err := git.NewGitHubProvider(github.URL, "test-token", nil)
 	if err != nil {
 		t.Fatalf("create github provider: %v", err)
 	}

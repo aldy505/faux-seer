@@ -259,6 +259,7 @@ func (s *Service) Update(ctx context.Context, raw json.RawMessage) (UpdateRespon
 	var resumeQuery string
 	switch payloadType {
 	case "interrupt":
+		state.Blocks = dropLoadingBlocks(state.Blocks)
 		state.Status = db.RunStatusCompleted
 		state.PendingUserInput = nil
 	case "user_input_response":
@@ -268,7 +269,10 @@ func (s *Service) Update(ctx context.Context, raw json.RawMessage) (UpdateRespon
 			state.Status = db.RunStatusCompleted
 			break
 		}
-		state.Blocks = append(state.Blocks, makeBlock("user", resumeQuery, len(state.Blocks)+1, nowTimestamp()))
+		state.Blocks = append(state.Blocks,
+			makeBlock("user", resumeQuery, len(state.Blocks)+1, nowTimestamp()),
+			makeLoadingBlock(len(state.Blocks)+2, nowTimestamp()),
+		)
 		state.Status = db.RunStatusProcessing
 	case "awaiting_user_input":
 		state.Status = db.RunStatusAwaiting
@@ -357,7 +361,10 @@ func (s *Service) startRun(ctx context.Context, request chatRequest) (ChatRespon
 	userID := extractUserID(request.UserOrgContext)
 	timestamp := nowTimestamp()
 	state := RunState{
-		Blocks:       []MemoryBlock{makeBlock("user", request.Query, 1, timestamp)},
+		Blocks: []MemoryBlock{
+			makeBlock("user", request.Query, 1, timestamp),
+			makeLoadingBlock(2, timestamp),
+		},
 		Status:       db.RunStatusProcessing,
 		UpdatedAt:    timestamp,
 		OwnerUserID:  userID,
@@ -419,7 +426,10 @@ func (s *Service) continueRun(ctx context.Context, request chatRequest) (ChatRes
 			blocks = append([]MemoryBlock{}, blocks[:index]...)
 		}
 	}
-	blocks = append(blocks, makeBlock("user", request.Query, len(blocks)+1, timestamp))
+	blocks = append(blocks,
+		makeBlock("user", request.Query, len(blocks)+1, timestamp),
+		makeLoadingBlock(len(blocks)+2, timestamp),
+	)
 	state.Blocks = blocks
 	state.Status = db.RunStatusProcessing
 	state.FailureReason = nil
@@ -504,7 +514,7 @@ func (s *Service) completeRun(ctx context.Context, runID int64, reply string) er
 		return err
 	}
 	timestamp := nowTimestamp()
-	state.Blocks = append(state.Blocks, makeBlock("assistant", reply, len(state.Blocks)+1, timestamp))
+	state.Blocks = resolveLoadingBlock(state.Blocks, reply, timestamp)
 	state.Status = db.RunStatusCompleted
 	state.FailureReason = nil
 	state.UpdatedAt = timestamp
@@ -518,14 +528,12 @@ func (s *Service) completeRun(ctx context.Context, runID int64, reply string) er
 	return s.store.UpdateExplorerRun(ctx, *record)
 }
 
-// failRun marks a run as failed. A cancelled context means the process is
-// shutting down, which is reported as "shutdown"; the state write itself uses a
-// live context because the run context may already be cancelled.
+// failRun marks a run as failed with a classified reason (see classifyFailure)
+// and drops the pending assistant block, so a terminal run never still claims to
+// be loading. The state write uses a live context because the run context may
+// already be cancelled.
 func (s *Service) failRun(ctx context.Context, runID int64, cause error) error {
-	message := cause.Error()
-	if errors.Is(cause, context.Canceled) || errors.Is(cause, context.DeadlineExceeded) {
-		message = "shutdown"
-	}
+	message := classifyFailure(cause)
 	writeCtx := context.WithoutCancel(ctx)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -540,6 +548,7 @@ func (s *Service) failRun(ctx context.Context, runID int64, cause error) error {
 	if err != nil {
 		return err
 	}
+	state.Blocks = dropLoadingBlocks(state.Blocks)
 	state.Status = db.RunStatusError
 	state.FailureReason = &message
 	state.UpdatedAt = nowTimestamp()
@@ -670,6 +679,57 @@ func extractUserID(context map[string]any) *int64 {
 		}
 	}
 	return nil
+}
+
+// makeLoadingBlock builds the in-flight assistant block a run carries while its
+// reply is being generated. Sentry renders a block with loading set as a pending
+// message, so a slow provider shows progress instead of an empty session, and
+// the block is filled in rather than duplicated when the reply lands.
+func makeLoadingBlock(sequence int, timestamp string) MemoryBlock {
+	block := makeBlock("assistant", "", sequence, timestamp)
+	block.Loading = true
+	return block
+}
+
+// resolveLoadingBlock fills in the pending assistant block, or appends the reply
+// when the run has none, so a completed run always ends with exactly one
+// assistant block for the turn.
+func resolveLoadingBlock(blocks []MemoryBlock, reply, timestamp string) []MemoryBlock {
+	for i := len(blocks) - 1; i >= 0; i-- {
+		if blocks[i].Loading {
+			blocks[i].Message.Content = reply
+			blocks[i].Loading = false
+			blocks[i].Timestamp = timestamp
+			return blocks
+		}
+	}
+	return append(blocks, makeBlock("assistant", reply, len(blocks)+1, timestamp))
+}
+
+// dropLoadingBlocks removes the pending assistant block when a run reaches a
+// terminal state without an answer, so no terminal state claims to be loading.
+func dropLoadingBlocks(blocks []MemoryBlock) []MemoryBlock {
+	kept := make([]MemoryBlock, 0, len(blocks))
+	for _, block := range blocks {
+		if !block.Loading {
+			kept = append(kept, block)
+		}
+	}
+	return kept
+}
+
+// classifyFailure maps a failed run onto Sentry's own failure vocabulary:
+// "shutdown" for a process shutdown, "timeout" for a provider that did not
+// answer within OUTBOUND_TIMEOUT, and the underlying error text otherwise.
+func classifyFailure(cause error) string {
+	if errors.Is(cause, context.Canceled) {
+		return "shutdown"
+	}
+	var timeout interface{ Timeout() bool }
+	if errors.Is(cause, context.DeadlineExceeded) || (errors.As(cause, &timeout) && timeout.Timeout()) {
+		return "timeout"
+	}
+	return cause.Error()
 }
 
 func makeBlock(role, content string, sequence int, timestamp string) MemoryBlock {

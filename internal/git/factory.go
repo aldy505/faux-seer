@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/aldy505/faux-seer/internal/config"
+	"github.com/aldy505/faux-seer/internal/httpclient"
 )
 
 // NewProvider builds the repository provider selected by name.
@@ -16,7 +17,7 @@ import (
 func NewProvider(cfg *config.Config, provider string) (Provider, error) {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "", "github":
-		return NewGitHubProvider(cfg.GitHubBaseURL, cfg.GitHubToken)
+		return NewGitHubProvider(cfg.GitHubBaseURL, cfg.GitHubToken, httpclient.New(cfg))
 	case "gitlab":
 		return NewGitLabProvider(cfg.GitLabBaseURL, cfg.GitLabToken)
 	case "gitea":

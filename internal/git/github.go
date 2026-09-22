@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/aldy505/faux-seer/internal/httpclient"
 )
 
 // maxResponseBytes bounds a single provider response so a misconfigured base URL
@@ -29,15 +31,18 @@ type githubProvider struct {
 // NewGitHubProvider creates a GitHub REST API client. An empty token reports
 // ErrNotConfigured, because unauthenticated GitHub access cannot list a private
 // installation's repositories.
-func NewGitHubProvider(baseURL, token string) (Provider, error) {
+func NewGitHubProvider(baseURL, token string, httpClient *http.Client) (Provider, error) {
 	if strings.TrimSpace(token) == "" {
 		return nil, fmt.Errorf("%w: GITHUB_TOKEN is empty", ErrNotConfigured)
 	}
 	if strings.TrimSpace(baseURL) == "" {
 		baseURL = "https://api.github.com"
 	}
+	if httpClient == nil {
+		httpClient = httpclient.New(nil)
+	}
 	return &githubProvider{
-		client:   &http.Client{},
+		client:   httpClient,
 		baseURL:  strings.TrimRight(baseURL, "/"),
 		token:    token,
 		perPage:  100,

@@ -71,7 +71,7 @@ Most endpoints now perform real work when the right credentials are configured. 
 
 **Now real (when configured):**
 
-- `explorer/chat` — async run with LLM, code-index augmentation
+- `explorer/chat` — async run with LLM, code-index augmentation. The run carries a pending assistant block (`loading: true`) while the reply is generated and fills it in on completion, so polling clients always have something to render; a provider that does not answer within `OUTBOUND_TIMEOUT` fails the run with `failure_reason: "timeout"`
 - `explorer/repos` — stored preferences or configured provider's repos
 - `explorer/index/org-repo-knowledge` — fetches, chunks, embeds, stores repository code
 - `agent/feature/run` — persisted run with LLM, idempotency key

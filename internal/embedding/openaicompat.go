@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/aldy505/faux-seer/internal/config"
+	"github.com/aldy505/faux-seer/internal/httpclient"
 )
 
 type openAICompatClient struct {
@@ -40,8 +41,14 @@ type stubClient struct{ dimensions int }
 
 // NewOpenAICompatClient creates an OpenAI-compatible embedding client.
 // Model names are rotated round-robin across requests.
-func NewOpenAICompatClient(baseURL, apiKey string, models []string, dimensions int, httpReferer string) Client {
-	return &openAICompatClient{httpClient: &http.Client{}, baseURL: strings.TrimRight(baseURL, "/"), apiKey: apiKey, models: config.NewModelSelector(models), dimensions: dimensions, httpReferer: httpReferer}
+// A nil httpClient falls back to a client bounded by
+// config.DefaultOutboundTimeout, so no embedding call can wait on a provider
+// forever.
+func NewOpenAICompatClient(baseURL, apiKey string, models []string, dimensions int, httpReferer string, httpClient *http.Client) Client {
+	if httpClient == nil {
+		httpClient = httpclient.New(nil)
+	}
+	return &openAICompatClient{httpClient: httpClient, baseURL: strings.TrimRight(baseURL, "/"), apiKey: apiKey, models: config.NewModelSelector(models), dimensions: dimensions, httpReferer: httpReferer}
 }
 
 // NewStubClient creates a deterministic local embedding client.

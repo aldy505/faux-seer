@@ -7,7 +7,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// DefaultOutboundTimeout bounds every call faux-seer makes to an external
+// provider. A provider that accepts a connection and never answers must not be
+// able to hold a run in "processing" forever, because Sentry polls the run and
+// gives up long before an unbounded call would return.
+const DefaultOutboundTimeout = 60 * time.Second
 
 // Config holds all runtime configuration for faux-seer.
 type Config struct {
@@ -35,6 +42,7 @@ type Config struct {
 	VectorDimensions     int
 	SimilarityThreshold  float64
 	HTTPReferer          string
+	OutboundTimeout      time.Duration
 
 	GitHubToken      string
 	GitHubBaseURL    string
@@ -93,6 +101,11 @@ func Load() (*Config, error) {
 	cfg.SimilarityThreshold = floatDefault("SIMILARITY_THRESHOLD", 0.1, &errs)
 	cfg.CodeIndexChunkSize = intDefault("CODE_INDEX_CHUNK_SIZE", 1000, &errs)
 	cfg.CodeIndexChunkOverlap = intDefault("CODE_INDEX_CHUNK_OVERLAP", 200, &errs)
+	cfg.OutboundTimeout = durationDefault("OUTBOUND_TIMEOUT", DefaultOutboundTimeout, &errs)
+
+	if cfg.OutboundTimeout <= 0 {
+		errs = append(errs, "OUTBOUND_TIMEOUT must be greater than zero")
+	}
 
 	if cfg.CodeIndexChunkSize <= 0 {
 		errs = append(errs, "CODE_INDEX_CHUNK_SIZE must be greater than zero")
@@ -182,6 +195,20 @@ func boolDefault(key string, fallback bool, errs *[]string) bool {
 	parsed, err := strconv.ParseBool(value)
 	if err != nil {
 		*errs = append(*errs, fmt.Sprintf("%s must be a boolean", key))
+		return fallback
+	}
+	return parsed
+}
+
+// durationDefault parses a Go duration such as "90s" or "2m".
+func durationDefault(key string, fallback time.Duration, errs *[]string) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		*errs = append(*errs, fmt.Sprintf("%s must be a duration such as 30s or 2m", key))
 		return fallback
 	}
 	return parsed

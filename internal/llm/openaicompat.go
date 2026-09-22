@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/aldy505/faux-seer/internal/config"
+	"github.com/aldy505/faux-seer/internal/httpclient"
 )
 
 type openAICompatClient struct {
@@ -40,10 +41,15 @@ type chatCompletionResponse struct {
 }
 
 // NewOpenAICompatClient builds an OpenAI-compatible chat completion client.
-// Model names are rotated round-robin across requests.
-func NewOpenAICompatClient(baseURL, apiKey string, models []string, httpReferer string) Client {
+// Model names are rotated round-robin across requests. A nil httpClient falls
+// back to a client bounded by config.DefaultOutboundTimeout, so no caller can
+// construct one that waits on a provider forever.
+func NewOpenAICompatClient(baseURL, apiKey string, models []string, httpReferer string, httpClient *http.Client) Client {
+	if httpClient == nil {
+		httpClient = httpclient.New(nil)
+	}
 	return &openAICompatClient{
-		httpClient:  &http.Client{},
+		httpClient:  httpClient,
 		baseURL:     strings.TrimRight(baseURL, "/"),
 		apiKey:      apiKey,
 		models:      config.NewModelSelector(models),

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/aldy505/faux-seer/internal/config"
+	"github.com/aldy505/faux-seer/internal/httpclient"
 )
 
 type anthropicClient struct {
@@ -39,11 +40,17 @@ type anthropicResponse struct {
 
 // NewAnthropicClient builds an Anthropic messages API client.
 // Model names are rotated round-robin across requests.
-func NewAnthropicClient(baseURL, apiKey string, models []string) Client {
+// A nil httpClient falls back to a client bounded by
+// config.DefaultOutboundTimeout, so no caller can construct one that waits on a
+// provider forever.
+func NewAnthropicClient(baseURL, apiKey string, models []string, httpClient *http.Client) Client {
 	if strings.TrimSpace(baseURL) == "" {
 		baseURL = "https://api.anthropic.com/v1"
 	}
-	return &anthropicClient{httpClient: &http.Client{}, baseURL: strings.TrimRight(baseURL, "/"), apiKey: apiKey, models: config.NewModelSelector(models)}
+	if httpClient == nil {
+		httpClient = httpclient.New(nil)
+	}
+	return &anthropicClient{httpClient: httpClient, baseURL: strings.TrimRight(baseURL, "/"), apiKey: apiKey, models: config.NewModelSelector(models)}
 }
 
 func (c *anthropicClient) Complete(ctx context.Context, req CompletionRequest) (string, error) {

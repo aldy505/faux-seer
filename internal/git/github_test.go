@@ -13,7 +13,7 @@ import (
 )
 
 func TestNewGitHubProviderRequiresToken(t *testing.T) {
-	if _, err := NewGitHubProvider("https://api.github.com", "  "); !errors.Is(err, ErrNotConfigured) {
+	if _, err := NewGitHubProvider("https://api.github.com", "  ", nil); !errors.Is(err, ErrNotConfigured) {
 		t.Fatalf("expected ErrNotConfigured, got %v", err)
 	}
 }
@@ -40,7 +40,7 @@ func TestGitHubProviderListReposFollowsPagination(t *testing.T) {
 	}))
 	defer server.Close()
 
-	provider, err := NewGitHubProvider(server.URL, "test-token")
+	provider, err := NewGitHubProvider(server.URL, "test-token", nil)
 	if err != nil {
 		t.Fatalf("create github provider: %v", err)
 	}
@@ -80,7 +80,7 @@ func TestGitHubProviderReadFileAndTree(t *testing.T) {
 	}))
 	defer server.Close()
 
-	provider, err := NewGitHubProvider(server.URL, "test-token")
+	provider, err := NewGitHubProvider(server.URL, "test-token", nil)
 	if err != nil {
 		t.Fatalf("create github provider: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestGitHubProviderReportsNotFound(t *testing.T) {
 	}))
 	defer server.Close()
 
-	provider, err := NewGitHubProvider(server.URL, "test-token")
+	provider, err := NewGitHubProvider(server.URL, "test-token", nil)
 	if err != nil {
 		t.Fatalf("create github provider: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestGitHubProviderReadsPullRequestFiles(t *testing.T) {
 	}))
 	defer server.Close()
 
-	provider, err := NewGitHubProvider(server.URL, "test-token")
+	provider, err := NewGitHubProvider(server.URL, "test-token", nil)
 	if err != nil {
 		t.Fatalf("create github provider: %v", err)
 	}

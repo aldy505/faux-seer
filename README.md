@@ -265,6 +265,7 @@ Core environment variables:
 | `VECTOR_STORE_DSN` | Required when `VECTOR_STORE=pgvector` |
 | `VECTOR_DIMENSIONS` | Embedding/vector width for pgvector storage |
 | `SIMILARITY_THRESHOLD` | Default nearest-neighbor threshold |
+| `OUTBOUND_TIMEOUT` | Budget for one call to an external provider (LLM, embedding, repository host), default `60s`. A provider that accepts a connection and never answers is abandoned after this, and the run it was serving fails with `failure_reason: "timeout"` instead of staying `processing` forever. Hosts that drop packets fail after a fixed 10s dial timeout regardless |
 | `LLM_MODEL` | Comma-separated model list, rotated round-robin per request |
 | `EMBEDDING_MODEL` | Comma-separated model list, rotated round-robin per request |
 | `GITHUB_TOKEN` | GitHub personal-access token; when set, explorer repos, org-repo indexing, codegen, and delegated-agent-match become real |
@@ -384,7 +385,7 @@ Most endpoints now perform real work when the right credentials are configured. 
 
 **Real when configured:**
 
-- **Explorer chat** creates an async run, calls the LLM, and persists the reply. The code index augments replies with repository chunks when a repository provider and embedding client are available.
+- **Explorer chat** creates an async run, calls the LLM, and persists the reply. The code index augments replies with repository chunks when a repository provider and embedding client are available. A run in flight carries a pending assistant block (`loading: true`) that the reply fills in, so a poller sees progress rather than an empty session; if the provider does not answer within `OUTBOUND_TIMEOUT`, the run ends as `status: "error"` with `failure_reason: "timeout"`.
 - **Explorer repos** lists stored repository preferences or the configured provider's repositories.
 - **Explorer index/org-repo-knowledge** fetches, chunks, embeds, and stores repository code in the vector backend.
 - **Summarize/trace**, **summarize/fixability**, and all **feedback/* endpoints** call the LLM.
